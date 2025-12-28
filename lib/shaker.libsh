@@ -115,11 +115,8 @@ normalize_case() {
         elif [ "${normalized_output_case}" == "upper" ]; then
             echo "${input^^}"
             return 0
-        else
-            log_event "error" "normalize_case: Invalid case argument '$case'. Use 'lower' or 'upper'."
-            return 1
         fi
-    
+
     else 
 
         local normalized_output_case="$(echo "${output_case}" | tr '[:upper:]' '[:lower:]')"
@@ -130,12 +127,14 @@ normalize_case() {
         elif [ "${normalized_output_case}" == "upper" ]; then
             echo "$input" | tr '[:lower:]' '[:upper:]'
             return 0
-        else
-            log_event "error" "normalize_case: Invalid case argument '$case'. Use 'lower' or 'upper'."
-            return 1
         fi
 
     fi
+
+    echo "Error: normalize_case: Invalid case argument '$output_case'. Use 'lower' or 'upper'." >&2
+    return 1
+
+
 }
 
 

@@ -141,11 +141,11 @@ log_event() {
 
     if [[ $(normalize_boolean "${color_log}") == "true" ]]; then
         case "$log_level" in
-            INFO)  log_level_color="$GREEN" ;;
-            WARN)  log_level_color="$YELLOW" ;;
-            ERROR) log_level_color="$RED" ;;
-            DEBUG) log_level_color="$MAGENTA" ;;
-            *)     log_level_color="$COLOR_RESET" ;; # Fallback, no colors
+            INFO|info)   log_level_color="$GREEN" ;;
+            WARN|warn)   log_level_color="$YELLOW" ;;
+            ERROR|error) log_level_color="$RED" ;;
+            DEBUG|debug) log_level_color="$MAGENTA" ;;
+            *)           log_level_color="$COLOR_RESET" ;; # Fallback, no colors
         esac
     else
         log_level_color="" 
