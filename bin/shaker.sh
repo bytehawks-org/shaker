@@ -1,8 +1,8 @@
 #!/bin/bash
 
-set -o errexit  # Esci subito se un comando fallisce (set -e)
-set -o nounset  # Esci se usi una variabile non dichiarata (set -u)
-set -o pipefail # Esci se un comando in una pipe fallisce (non solo l'ultimo)
+set -o errexit
+set -o nounset
+set -o pipefail
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../lib/shaker.libsh"
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../lib/os.libsh"
