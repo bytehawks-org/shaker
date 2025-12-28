@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+
+
+shaker_base_path() {
+    local BH_SHAKER_CURRENT_SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+    export BH_SHAKER_BASE_FOLDER="${BH_SHAKER_CURRENT_SCRIPT_DIR%/lib}"
+}
+
+shaker_assets_path() {
+    export BH_SHAKER_ASSETS_FOLDER="${BH_SHAKER_BASE_FOLDER}/assets"
+}
+
+shaker_lib_path() {
+    export BH_SHAKER_LIB_FOLDER="${BH_SHAKER_BASE_FOLDER}/lib"
+}
+
+
+
+
+
+##############################################################################
+#
+# Function: normalize_boolean
+#
+# Normalizes various boolean-like input values to "true" or "false" strings.
+#
+# Arguments:
+#   $1 - The input value to normalize. Recognized values include:
+#          - "yes", "y", "1", "true" as TRUE values.
+#          - "no", "n", "none", "0", "false" as FALSE values.
+#        All values are treated as case-insensitively.
+#
+# Outputs:
+#   Echoes "true" if the input represents a true value.
+#   Echoes "false" if the input represents a false value or is unrecognized.
+#
+# Returns:
+#   0 if the input is recognized as a boolean value
+#   1 if the input is unrecognized
+#
+# Examples:
+#   MY_VAR="Y"   -> normalize_boolean "${MY_VAR}" -> outputs "true", Returns 0
+#   MY_VAR="0"  -> normalize_boolean "${MY_VAR}" -> outputs "false", Returns 0
+#   MY_VAR="Na" -> normalize_boolean "${MY_VAR}" -> outputs "false", Returns 1
+#
+# Notes: 
+#   Bash 4.0+ is required for case modification features.
+#
+##############################################################################
+normalize_boolean() {
+
+    local input="${1:-}"
+    local lower_input="${input,,}"
+
+    case "$lower_input" in
+        true|yes|y|1)
+            echo "true"
+            return 0
+            ;;
+        false|no|n|none|0)
+            echo "false"
+            return 0
+            ;;
+        *)
+            echo "false"
+            return 1
+            ;;
+    esac
+
+}
+
+
+normalize_lowercase() {
+    local input="$1"
+    
+    # BASH_VERSINFO[0] contiene la major version.
+    # La sintassi ${var,,} è stata introdotta in Bash 4.0.
+    if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+        # Metodo Ottimizzato (Nessun fork di processi esterni)
+        echo "${input,,}"
+    else
+        # Metodo Retrocompatibile (Funziona anche su Bash 3.x / macOS default precedente)
+        echo "$input" | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
+
+normalize_uppercase() {
+    local input="$1"
+    
+    # BASH_VERSINFO[0] contiene la major version.
+    # La sintassi ${var,,} è stata introdotta in Bash 4.0.
+    if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+        # Metodo Ottimizzato (Nessun fork di processi esterni)
+        echo "${input^^}"
+    else
+        # Metodo Retrocompatibile (Funziona anche su Bash 3.x / macOS default precedente)
+        echo "$input" | tr '[:lower:]' '[:upper:]'
+    fi
+}
+
+
+cleanup_bh_shaker_env_vars() {
+    # Controllo versione Bash (>= 3.0 supporta ${!var@})
+    if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 3 ]; then
+        # Recuperiamo la lista in un array (o stringa espansa) per sicurezza
+        local vars_to_unset="${!BH_SHAKER_@}"
+        
+        if [ -n "$vars_to_unset" ]; then
+            # Nota: qui passiamo la stringa alla tua funzione error/info per loggare
+            # Assumiamo che 'error' o 'info' gestiscano bene le stringhe
+            # Se la funzione 'error' non esiste, usa 'echo' o 'stderr_print'
+            log_event "info" "Pulizia variabili: $vars_to_unset"
+            
+            # IMPORTANTE: Qui le virgolette NON vanno messe per permettere a unset
+            # di vedere ogni variabile come argomento separato.
+            unset $vars_to_unset
+        fi
+    else
+        # Fallback per shell molto vecchie (uso di compgen)
+        for var in $(compgen -v | grep '^BH_SHAKER_'); do
+            log_event "info" "Pulizia variabile: $var"
+            unset "$var"
+        done
+    fi
+}
+
+debug_bh_shaker_env_vars() {
+
+    echo "Debugging BH_SHAKER_ environment variables:"
+    if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 3 ]; then
+        for var in "${!BH_SHAKER_@}"; do
+            echo "$var=${!var}"
+        done
+    else
+        for var in $(compgen -v | grep '^BH_SHAKER_'); do
+            echo "$var=${!var}"
+        done
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: print_welcome_banner
+#
+# Prints the welcome banner if the banner file exists and banner display 
+# is not disabled with the BH_SHAKER_DISABLE_BANNER environment variable.
+# 
+# The function checks for the presence of a banner file at the path specified 
+# by the BH_SHAKER_ASSETS_FOLDER environment variable. 
+# If the file exists and the BH_SHAKER_DISABLE_BANNER environment variable 
+# is not set to a true value (as determined by the normalize_boolean function),
+# the banner is displayed using base system command 'cat'.
+# If banner display is disabled, a message is printed indicating this.
+# If the banner file does not exist, a message is printed indicating the 
+# issing file.
+#
+##############################################################################
+print_welcome_banner() {
+
+    if [[ -f "${BH_SHAKER_ASSETS_FOLDER}/banner.txt" ]]; then
+        if [[ $(normalize_boolean "${BH_SHAKER_DISABLE_BANNER}") == "false" ]]; then
+            cat "${BH_SHAKER_ASSETS_FOLDER}/banner.txt"
+            return 0
+        else
+            echo "Banner display is disabled via BH_SHAKER_DISABLE_BANNER environment variable."
+            return 0
+        fi
+    else
+        echo "Banner file not found at ${BH_SHAKER_ASSETS_FOLDER}/banner.txt"
+        return 1
+    fi
+
+}
+
+

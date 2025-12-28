@@ -1,0 +1,20 @@
+
+///////////////////////////////////////////////////////////////////////////////
+/                                                                             /
+/   Hello, Lain.                                                              /
+/   Welcome to                                                                /
+/                                                                             /
+/       | |         | |                                                       /
+/    ___| |__   __ _| | _____ _ __                                            /
+/   / __| '_ \ / _` | |/ / _ \ '__|                                           /
+/   \__ \ | | | (_| |   <  __/ |                                              /
+/   |___/_| |_|\__,_|_|\_\___|_|                                              /
+/                                                                             /
+/   A modular bash framework for hardened initialization and identity         /
+/   governance across container and "legacy" VM environments.                 /
+/                                                                             /
+/   "shaker" is part of ByteHawks project.                                    /
+/   GitHub: https://github.com/bytehawks-org/shaker                           /
+/                                                                             /
+///////////////////////////////////////////////////////////////////////////////
+ 

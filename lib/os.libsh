@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+
+##############################################################################
+#
+# Function: detect_deployment_environment
+#
+#
+##############################################################################
+detect_deployment_environment() {
+
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+
+    local IS_VIRTUAL_MACHINE=$(systemd-detect-virt --vm)
+    local IS_CONTAINER=$(systemd-detect-virt --container)
+
+    if [[ $(normalize_boolean "${IS_VIRTUAL_MACHINE}") != "false"  ]]; then
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="vm"
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_VIRTUAL_MACHINE}"
+        return 0
+    elif [[ $(normalize_boolean "${IS_CONTAINER}") != "false" ]]; then
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="container"
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_CONTAINER}"
+
+        if env | grep -q "KUBERNETES_SERVICE_HOST="; then
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR="kubernetes"
+        fi
+        return 0
+    else
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="physical"
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="physical"
+        return 0
+    fi
+
+
+fi
+
+}
+
+
+detect_os() {
+
+    local OS_NAME="unknown"
+    local OS_VERSION="unknown"
+    local OS_ID="unknown"     # 'ubuntu', 'centos', 'alpine'
+    local OS_VERSION_ID="unknown"  # '20.04', '8', '3.15'
+    local OS_PKG_MANAGER="unknown"
+
+    if [ -f /etc/os-release ]; then
+        # Modern and current systems
+        OS_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')                  # e.g. 'fedora'
+        OS_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')              # e.g. 'Fedora Linux'
+        OS_VERSION_ID=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')  # e.g. '43'
+        OS_VERSION=$(grep '^VERSION=' /etc/os-release | cut -d= -f2 | tr -d '"')        # e.g. '43 (KDE Plasma Desktop Edition)'
+
+    elif command -v lsb_release >/dev/null 2>&1; then
+        # Old and legacy systems
+        OS_ID=$($(lsb_release -si) | tr '[:upper:]' '[:lower:]')
+        OS_NAME=$(lsb_release -si)
+        OS_VERSION_ID=$(lsb_release -sr)
+        OS_VERSION=$(lsb_release -sd)
+
+    else
+        # Fallback
+        OS_NAME=$(uname -s)
+        OS_VERSION=$(uname -r)
+    fi
+
+    export BH_SHAKER_OS_NAME="${OS_NAME,,}"
+    export BH_SHAKER_OS_VERSION="${OS_VERSION,,}"
+    export BH_SHAKER_OS_ID="${OS_ID,,}"
+    export BH_SHAKER_OS_VERSION_ID="${OS_VERSION_ID,,}"
+    return 0
+
+}
+
+
+detect_package_manager() {
+
+    local PKG_MANAGER="unknown"
+    local PKG_MANAGER_PATH="unknown"
+    local PKG_KNOWN_MANAGERS=("dnf" "yum" "tdnf" "microdnf" "apt-get" "apt" "pacman" "zypper" "apk")
+
+    for pkg_mgr in "${PKG_KNOWN_MANAGERS[@]}"; do
+        if command -v "${pkg_mgr}" >/dev/null 2>&1; then
+            PKG_MANAGER="${pkg_mgr}"
+            PKG_MANAGER_PATH=$(command -v "${pkg_mgr}")
+            break
+        fi
+    done
+
+    export BH_SHAKER_OS_PKG_MANAGER=$(normalize_lowercase "${PKG_MANAGER}")
+    export BH_SHAKER_OS_PKG_MANAGER_PATH=$(normalize_lowercase "${PKG_MANAGER_PATH}")
+    return 0
+
+}   

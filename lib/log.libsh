@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+
+# Font color constants
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+DARK_GRAY='\033[1;30m'
+LIGHT_PURPLE='\033[0;88m'
+MAGENTA='\033[0;35m'
+COLOR_RESET='\033[0m'
+
+
+
+
+stderr_print() {
+    local stderr_quiet="${BH_SHAKER_QUIET:-false}"
+    if [[ $(normalize_boolean "${stderr_quiet}") != "true" ]]; then
+        printf "%b\\n" "$*" >&2
+    fi
+}
+
+
+log_full_message() {
+
+    local default_color="true"
+
+    if [ ! -t 2 ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ]; then
+        default_color="false"
+    fi
+
+    local color_log="${BH_SHAKER_COLOR:-$default_color}"
+    local bh_shaker_module_name="${BH_SHAKER_MODULE:+[ $BH_SHAKER_MODULE ] }"
+    local timestamp=$(date "+%Y-%m-%d %T.%2N")
+
+    if [[ $(normalize_boolean "${color_log}") == "true" ]]; then
+        stderr_print "${DARK_GRAY}${timestamp} ${LIGHT_PURPLE}${bh_shaker_module_name}${COLOR_RESET}${*}"
+    else
+        stderr_print "${timestamp} ${bh_shaker_module_name}${*}"
+    fi
+}
+
+log_event() {
+
+    local default_color="true"
+
+    if [ ! -t 2 ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ]; then
+        default_color="false"
+    fi
+
+    local color_log="${BH_SHAKER_COLOR:-$default_color}"
+    local log_level_raw="${1:-UNKNOWN}"
+    local log_level=$(normalize_uppercase "$log_level_raw")
+    local log_level_color=""
+
+    shift 
+
+    if [[ $(normalize_boolean "${color_log}") == "true" ]]; then
+        case "$log_level" in
+            INFO|I)  log_level_color="$GREEN" ;;
+            WARN|W)  log_level_color="$YELLOW" ;;
+            ERROR|E) log_level_color="$RED" ;;
+            DEBUG|D) log_level_color="$MAGENTA" ;;
+            *)       log_level_color="$COLOR_RESET" ;; # Fallback, no colors
+        esac
+    else
+        log_level_color="" 
+    fi
+
+    log_full_message "${log_level_color}[${log_level}]${COLOR_RESET} $*"
+
+}
