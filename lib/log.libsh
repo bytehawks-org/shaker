@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 
-# Font color constants
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -14,15 +14,65 @@ COLOR_RESET='\033[0m'
 
 
 
-
+##############################################################################
+#
+# Function: stderr_print
+# 
+# Prints the given arguments to standard error unless quiet mode is enabled.
+# 
+# This function checks the value of the BH_SHAKER_QUIET environment variable.
+# If quiet mode is not enabled, it prints the provided arguments to stderr.
+#
+# Arguments:
+#   $* - The message(s) to print to standard error.
+#
+# Environment Variables:
+#   BH_SHAKER_QUIET - If set to "true", suppresses output to stderr.
+#
+# Dependencies:
+#   Requires the `normalize_boolean` function to interpret boolean values.
+#
+##############################################################################
 stderr_print() {
+
     local stderr_quiet="${BH_SHAKER_QUIET:-false}"
+
     if [[ $(normalize_boolean "${stderr_quiet}") != "true" ]]; then
         printf "%b\\n" "$*" >&2
     fi
+
 }
 
 
+
+##############################################################################
+#
+# Logs a full message to stderr with optional color formatting and module name.
+#
+# The function determines whether to use colored output based on:
+#   - Whether stderr is a terminal.
+#   - The presence of GITHUB_ACTIONS or CI environment variables.
+#   - The BH_SHAKER_COLOR environment variable (overrides default).
+#
+# The log message includes:
+#   - A timestamp (format: YYYY-MM-DD HH:MM:SS.xx).
+#   - An optional module name (from BH_SHAKER_MODULE).
+#   - The provided message arguments.
+#
+# If color is enabled, the timestamp and module name are colorized.
+#
+# Globals:
+#   BH_SHAKER_COLOR        - (optional) Forces color output if set.
+#   BH_SHAKER_MODULE       - (optional) Module name to include in log.
+#   DARK_GRAY, LIGHT_PURPLE, COLOR_RESET - Color codes for formatting.
+#
+# Arguments:
+#   $@  - The message to log.
+#
+# Outputs:
+#   Writes the formatted log message to stderr.
+#
+##############################################################################
 log_full_message() {
 
     local default_color="true"
@@ -42,6 +92,38 @@ log_full_message() {
     fi
 }
 
+
+##############################################################################
+#
+# Function: log_event
+#
+# Logs an event message with an optional log level and color formatting.
+#
+# Usage:
+#   log_event <level> <message>
+#
+# Arguments:
+#   <level>   The log level (e.g., INFO, WARN, ERROR, DEBUG). Case-insensitive.
+#   <message> The message to log.
+#
+# Behavior:
+#   - Determines if colored output should be used based on terminal and 
+#     environment variables.
+#   - Normalizes the log level to uppercase.
+#   - Applies color to the log level label if enabled.
+#   - Outputs the formatted log message using log_full_message.
+#
+# Environment Variables:
+#   BH_SHAKER_COLOR   If set, overrides color output (expects "true" or "false").
+#   GITHUB_ACTIONS    If set, disables color output (for CI environments).
+#   CI                If set, disables color output (for CI environments).
+#
+# Dependencies:
+#   - normalize_uppercase: Function to normalize a string to uppercase.
+#   - normalize_boolean: Function to normalize a boolean value.
+#   - log_full_message: Function to output the final log message.
+#   - Color variables: GREEN, YELLOW, RED, MAGENTA, COLOR_RESET.
+###############################################################################
 log_event() {
 
     local default_color="true"
@@ -59,11 +141,11 @@ log_event() {
 
     if [[ $(normalize_boolean "${color_log}") == "true" ]]; then
         case "$log_level" in
-            INFO|I)  log_level_color="$GREEN" ;;
-            WARN|W)  log_level_color="$YELLOW" ;;
-            ERROR|E) log_level_color="$RED" ;;
-            DEBUG|D) log_level_color="$MAGENTA" ;;
-            *)       log_level_color="$COLOR_RESET" ;; # Fallback, no colors
+            INFO)  log_level_color="$GREEN" ;;
+            WARN)  log_level_color="$YELLOW" ;;
+            ERROR) log_level_color="$RED" ;;
+            DEBUG) log_level_color="$MAGENTA" ;;
+            *)     log_level_color="$COLOR_RESET" ;; # Fallback, no colors
         esac
     else
         log_level_color="" 

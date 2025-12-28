@@ -1,42 +1,92 @@
 #!/usr/bin/env bash
 
+
+
 ##############################################################################
 #
 # Function: detect_deployment_environment
 #
+# Detects the current deployment environment and sets related environment
+# variables.
+#
+# This function checks if the system is running inside a virtual machine, 
+# a container, or on physical hardware. It uses `systemd-detect-virt` to 
+# determine the environment type.
+#
+# Environment variables set:
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT: "vm", "container", or "physical"
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE: The specific VM or container type, or "physical"
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR: Set to "kubernetes" 
+#        if running inside a Kubernetes-managed container
+#
+# Returns:
+#   - 0 on successful detection
+#
+# Dependencies:
+#   - systemd-detect-virt
+# - normalize_boolean (function must be defined elsewhere)
 #
 ##############################################################################
 detect_deployment_environment() {
 
-if command -v systemd-detect-virt >/dev/null 2>&1; then
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
 
-    local IS_VIRTUAL_MACHINE=$(systemd-detect-virt --vm)
-    local IS_CONTAINER=$(systemd-detect-virt --container)
+        local IS_VIRTUAL_MACHINE=$(systemd-detect-virt --vm)
+        local IS_CONTAINER=$(systemd-detect-virt --container)
 
-    if [[ $(normalize_boolean "${IS_VIRTUAL_MACHINE}") != "false"  ]]; then
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="vm"
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_VIRTUAL_MACHINE}"
-        return 0
-    elif [[ $(normalize_boolean "${IS_CONTAINER}") != "false" ]]; then
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="container"
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_CONTAINER}"
+        if [[ $(normalize_boolean "${IS_VIRTUAL_MACHINE}") != "false"  ]]; then
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="vm"
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_VIRTUAL_MACHINE}"
+            return 0
+        elif [[ $(normalize_boolean "${IS_CONTAINER}") != "false" ]]; then
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="container"
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_CONTAINER}"
 
-        if env | grep -q "KUBERNETES_SERVICE_HOST="; then
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR="kubernetes"
+            if env | grep -q "KUBERNETES_SERVICE_HOST="; then
+                export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR="kubernetes"
+            fi
+            return 0
+        else
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="physical"
+            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="physical"
+            return 0
         fi
-        return 0
-    else
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="physical"
-        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="physical"
-        return 0
+
+
     fi
-
-
-fi
 
 }
 
 
+
+##############################################################################
+#
+# Function: detect_os
+#
+# Detects the operating system and its version information, and exports
+# the results as environment variables for use in other scripts.
+#
+# The function attempts to determine the following details:
+#   - OS_NAME:        Human-readable name of the OS (e.g., "Ubuntu", "Fedora Linux")
+#   - OS_VERSION:     Full version string (e.g., "20.04.6 LTS (Focal Fossa)")
+#   - OS_ID:          Short identifier for the OS (e.g., "ubuntu", "centos", "alpine")
+#   - OS_VERSION_ID:  Short version identifier (e.g., "20.04", "8", "3.15")
+#
+# Detection order:
+#   1. If /etc/os-release exists (most modern systems), parse it for details.
+#   2. If lsb_release command is available (legacy systems), use it.
+#   3. Fallback to uname for basic system info.
+#
+# The detected values are exported as the following environment variables:
+#   - BH_SHAKER_OS_NAME
+#   - BH_SHAKER_OS_VERSION
+#   - BH_SHAKER_OS_ID
+#   - BH_SHAKER_OS_VERSION_ID
+#
+# Returns:
+#   0 (success)
+#
+##############################################################################
 detect_os() {
 
     local OS_NAME="unknown"
@@ -51,29 +101,47 @@ detect_os() {
         OS_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')              # e.g. 'Fedora Linux'
         OS_VERSION_ID=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')  # e.g. '43'
         OS_VERSION=$(grep '^VERSION=' /etc/os-release | cut -d= -f2 | tr -d '"')        # e.g. '43 (KDE Plasma Desktop Edition)'
-
     elif command -v lsb_release >/dev/null 2>&1; then
         # Old and legacy systems
         OS_ID=$($(lsb_release -si) | tr '[:upper:]' '[:lower:]')
         OS_NAME=$(lsb_release -si)
         OS_VERSION_ID=$(lsb_release -sr)
         OS_VERSION=$(lsb_release -sd)
-
     else
         # Fallback
         OS_NAME=$(uname -s)
         OS_VERSION=$(uname -r)
     fi
 
-    export BH_SHAKER_OS_NAME="${OS_NAME,,}"
-    export BH_SHAKER_OS_VERSION="${OS_VERSION,,}"
-    export BH_SHAKER_OS_ID="${OS_ID,,}"
-    export BH_SHAKER_OS_VERSION_ID="${OS_VERSION_ID,,}"
+    # Export normalized values
+    export BH_SHAKER_OS_NAME=$(normalize_lowercase "${OS_NAME}")
+    export BH_SHAKER_OS_VERSION=$(normalize_lowercase "${OS_VERSION}")
+    export BH_SHAKER_OS_ID=$(normalize_lowercase "${OS_ID}")
+    export BH_SHAKER_OS_VERSION_ID=$(normalize_lowercase "${OS_VERSION_ID}")
     return 0
 
 }
 
 
+
+##############################################################################
+#
+# Function: detect_package_manager
+#
+# Detects the available package manager on the system from a predefined list 
+# of known package managers (dnf, yum, tdnf, microdnf, apt-get, apt, pacman,
+# zypper, apk). Sets and exports two environment variables:
+#   - BH_SHAKER_OS_PKG_MANAGER: the name of the detected package manager
+#   - BH_SHAKER_OS_PKG_MANAGER_PATH: the full path to the detected package manager
+#
+# Both variables are normalized to lowercase using the normalize_lowercase
+# function. If no known package manager is found, both variables are set to
+# "unknown".
+#
+# Returns:
+#   0 (success)
+#
+##############################################################################
 detect_package_manager() {
 
     local PKG_MANAGER="unknown"
@@ -88,6 +156,7 @@ detect_package_manager() {
         fi
     done
 
+    # Export normalized values
     export BH_SHAKER_OS_PKG_MANAGER=$(normalize_lowercase "${PKG_MANAGER}")
     export BH_SHAKER_OS_PKG_MANAGER_PATH=$(normalize_lowercase "${PKG_MANAGER_PATH}")
     return 0
