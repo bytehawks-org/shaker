@@ -71,36 +71,91 @@ normalize_boolean() {
 }
 
 
-normalize_lowercase() {
-    local input="$1"
-    
-    # BASH_VERSINFO[0] contiene la major version.
-    # La sintassi ${var,,} è stata introdotta in Bash 4.0.
+###############################################################################
+#
+# Function: normalize_case
+#
+# Converts the input string to either lowercase or uppercase based on the   
+# specified case argument.
+#
+# Usage:
+#   normalize_case <case> <string>
+#
+# Arguments:
+#   <case>   The desired case for the output string. Accepted values are
+#            "lower" for lowercase conversion and "upper" for uppercase conversion.
+#   <string> The string to be converted.
+#
+# Behavior:
+#   - If running on Bash 4.0 or newer, uses parameter expansion for efficiency.
+#   - If running on older Bash versions (e.g., Bash 3.x as on macOS), falls back 
+#     to using 'tr'.
+#
+# Returns:
+#   Prints the converted string to stdout.
+#
+###############################################################################
+normalize_case() {
+
+    if [[ "$#" -ne 2 ]]; then
+        log_event "error" "normalize_case requires exactly 2 arguments: <case> <string>"
+        return 1
+    fi
+
+    local output_case="$1" 
+    local input="$2"
+
     if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
-        # Metodo Ottimizzato (Nessun fork di processi esterni)
-        echo "${input,,}"
-    else
-        # Metodo Retrocompatibile (Funziona anche su Bash 3.x / macOS default precedente)
-        echo "$input" | tr '[:upper:]' '[:lower:]'
+
+        local normalized_output_case="${output_case,,}"
+
+        if [ "${normalized_output_case}" == "lower" ]; then
+            echo "${input,,}"
+            return 0
+        elif [ "${normalized_output_case}" == "upper" ]; then
+            echo "${input^^}"
+            return 0
+        else
+            log_event "error" "normalize_case: Invalid case argument '$case'. Use 'lower' or 'upper'."
+            return 1
+        fi
+    
+    else 
+
+        local normalized_output_case="$(echo "${output_case}" | tr '[:upper:]' '[:lower:]')"
+
+        if [ "${normalized_output_case}" == "lower" ]; then
+            echo "$input" | tr '[:upper:]' '[:lower:]'
+            return 0
+        elif [ "${normalized_output_case}" == "upper" ]; then
+            echo "$input" | tr '[:lower:]' '[:upper:]'
+            return 0
+        else
+            log_event "error" "normalize_case: Invalid case argument '$case'. Use 'lower' or 'upper'."
+            return 1
+        fi
+
     fi
 }
 
 
-normalize_uppercase() {
-    local input="$1"
-    
-    # BASH_VERSINFO[0] contiene la major version.
-    # La sintassi ${var,,} è stata introdotta in Bash 4.0.
-    if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
-        # Metodo Ottimizzato (Nessun fork di processi esterni)
-        echo "${input^^}"
-    else
-        # Metodo Retrocompatibile (Funziona anche su Bash 3.x / macOS default precedente)
-        echo "$input" | tr '[:lower:]' '[:upper:]'
-    fi
-}
 
-
+###############################################################################
+#
+# Function: cleanup_bh_shaker_env_vars
+#
+# Removes all environment variables that start with the prefix "BH_SHAKER_".
+#
+# During cleanup, an informational message is logged for each variable removed
+# or for the list of removed variables, using the log_event function.
+#
+# Note:
+# - Requires the log_event function to be defined for event logging.
+# - On Bash >= 3.0, uses the ${!BH_SHAKER_@} expansion to get the list of
+#   variables to remove.
+# - On older versions, uses compgen and grep to identify the variables.
+#
+###############################################################################
 cleanup_bh_shaker_env_vars() {
     # Controllo versione Bash (>= 3.0 supporta ${!var@})
     if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 3 ]; then
@@ -126,20 +181,36 @@ cleanup_bh_shaker_env_vars() {
     fi
 }
 
+
+
+###############################################################################
+#
+# Function: debug_bh_shaker_env_vars
+#
+# Prints all environment variables that start with 'BH_SHAKER_' and their 
+# values for debugging purposes.
+# Uses advanced parameter expansion if Bash version >= 3, otherwise falls back 
+# to using 'compgen' and 'grep'.
+#
+# Usage: debug_bh_shaker_env_vars
+#
+###############################################################################
 debug_bh_shaker_env_vars() {
 
-    echo "Debugging BH_SHAKER_ environment variables:"
+    log_event "debug" "BH_SHAKER_ available environment variables:"
+
     if [ -n "${BASH_VERSINFO[0]}" ] && [ "${BASH_VERSINFO[0]}" -ge 3 ]; then
         for var in "${!BH_SHAKER_@}"; do
-            echo "$var=${!var}"
+            log_event "debug" "Environment variable: $var=${!var}"
         done
     else
         for var in $(compgen -v | grep '^BH_SHAKER_'); do
-            echo "$var=${!var}"
+            log_event "debug" "Environment variable: $var=${!var}"
         done
     fi
 
 }
+
 
 
 ##############################################################################
@@ -161,8 +232,10 @@ debug_bh_shaker_env_vars() {
 ##############################################################################
 print_welcome_banner() {
 
+    local hide_banner="${BH_SHAKER_DISABLE_BANNER:-false}"
+
     if [[ -f "${BH_SHAKER_ASSETS_FOLDER}/banner.txt" ]]; then
-        if [[ $(normalize_boolean "${BH_SHAKER_DISABLE_BANNER}") == "false" ]]; then
+        if [[ $(normalize_boolean "${hide_banner}") == "false" ]]; then
             cat "${BH_SHAKER_ASSETS_FOLDER}/banner.txt"
             return 0
         else
@@ -175,5 +248,4 @@ print_welcome_banner() {
     fi
 
 }
-
 

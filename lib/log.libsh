@@ -119,7 +119,7 @@ log_full_message() {
 #   CI                If set, disables color output (for CI environments).
 #
 # Dependencies:
-#   - normalize_uppercase: Function to normalize a string to uppercase.
+#   - normalize_case: Function to normalize a string to uppercase.
 #   - normalize_boolean: Function to normalize a boolean value.
 #   - log_full_message: Function to output the final log message.
 #   - Color variables: GREEN, YELLOW, RED, MAGENTA, COLOR_RESET.
@@ -134,7 +134,7 @@ log_event() {
 
     local color_log="${BH_SHAKER_COLOR:-$default_color}"
     local log_level_raw="${1:-UNKNOWN}"
-    local log_level=$(normalize_uppercase "$log_level_raw")
+    local log_level=$(normalize_case "upper" "$log_level_raw")
     local log_level_color=""
 
     shift 

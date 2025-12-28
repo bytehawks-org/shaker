@@ -114,10 +114,10 @@ detect_os() {
     fi
 
     # Export normalized values
-    export BH_SHAKER_OS_NAME=$(normalize_lowercase "${OS_NAME}")
-    export BH_SHAKER_OS_VERSION=$(normalize_lowercase "${OS_VERSION}")
-    export BH_SHAKER_OS_ID=$(normalize_lowercase "${OS_ID}")
-    export BH_SHAKER_OS_VERSION_ID=$(normalize_lowercase "${OS_VERSION_ID}")
+    export BH_SHAKER_OS_NAME=$(normalize_case "lower" "${OS_NAME}")
+    export BH_SHAKER_OS_VERSION=$(normalize_case "lower" "${OS_VERSION}")
+    export BH_SHAKER_OS_ID=$(normalize_case "lower" "${OS_ID}")
+    export BH_SHAKER_OS_VERSION_ID=$(normalize_case "lower" "${OS_VERSION_ID}")
     return 0
 
 }
@@ -134,8 +134,8 @@ detect_os() {
 #   - BH_SHAKER_OS_PKG_MANAGER: the name of the detected package manager
 #   - BH_SHAKER_OS_PKG_MANAGER_PATH: the full path to the detected package manager
 #
-# Both variables are normalized to lowercase using the normalize_lowercase
-# function. If no known package manager is found, both variables are set to
+# Both variables are normalized to lowercase using the normalize_case function. 
+# If no known package manager is found, both variables are set to
 # "unknown".
 #
 # Returns:
@@ -157,8 +157,8 @@ detect_package_manager() {
     done
 
     # Export normalized values
-    export BH_SHAKER_OS_PKG_MANAGER=$(normalize_lowercase "${PKG_MANAGER}")
-    export BH_SHAKER_OS_PKG_MANAGER_PATH=$(normalize_lowercase "${PKG_MANAGER_PATH}")
+    export BH_SHAKER_OS_PKG_MANAGER=$(normalize_case "lower" "${PKG_MANAGER}")
+    export BH_SHAKER_OS_PKG_MANAGER_PATH=$(normalize_case "lower" "${PKG_MANAGER_PATH}")
     return 0
 
 }   
