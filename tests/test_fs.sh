@@ -16,7 +16,7 @@ assert_ok "is_dir_empty on empty" is_dir_empty "${t}/none"
 assert_eq "32" "$(generate_random_string 32 | tr -d '\n' | wc -c | tr -d ' ')" "random string length"
 
 # arbitrary uid: writable passwd gets an entry (needs root + setpriv to simulate another uid)
-if am_i_root && command -v setpriv >/dev/null 2>&1; then
+if am_i_root && has_setpriv; then
     : > "${t}/passwd"; : > "${t}/group"; chmod 666 "${t}/passwd" "${t}/group"
     setpriv --reuid=54321 --regid=0 --clear-groups env SHAKER_PASSWD_FILE="${t}/passwd" SHAKER_GROUP_FILE="${t}/group" \
         bash -c ". '${TESTS_DIR}/../lib/shaker.libsh'; ensure_passwd_entry svc /tmp" >/dev/null 2>&1
@@ -37,3 +37,10 @@ mkdir "${t}/realdir"
 ( BH_ROOT="${t}/bytehawks" BH_LINK="${t}/realdir"; unset BH_CORE BH_DEPS BH_ETC BH_VAR BH_STATE; shaker_init_paths; shaker_bootstrap ) >/dev/null 2>&1
 assert_ok "bootstrap: real directory left untouched" test -d "${t}/realdir" -a ! -L "${t}/realdir"
 shaker_init_paths
+
+# BusyBox (Alpine) ships a setpriv applet that cannot switch uid: it must not be mistaken for util-linux's
+setpriv() { echo "BusyBox v1.36 multi-call binary. Usage: setpriv [-nd] PROG ARGS"; }
+assert_fail "busybox setpriv is not accepted" has_setpriv
+setpriv() { echo "Usage: setpriv [options] <program> [<argument>...]   --reuid <uid>"; }
+assert_ok "util-linux setpriv is accepted" has_setpriv
+unset -f setpriv

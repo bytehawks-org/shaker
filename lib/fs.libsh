@@ -115,7 +115,9 @@ ensure_group_exists() {
     getent group "${name}" >/dev/null 2>&1 && return 0
 
     if command -v groupadd >/dev/null 2>&1; then
-        groupadd $([[ -z "${gid}" || "${gid}" -lt 1000 ]] && echo -r) ${gid:+-g "${gid}"} "${name}"
+        local sysflag=()
+        if [[ -z "${gid}" || "${gid}" -lt 1000 ]]; then sysflag=(-r); fi
+        groupadd "${sysflag[@]+"${sysflag[@]}"}" ${gid:+-g "${gid}"} "${name}"
     else
         addgroup -S ${gid:+-g "${gid}"} "${name}"
     fi
@@ -145,6 +147,21 @@ ensure_user_exists() {
 
 ##############################################################################
 #
+# Function: has_setpriv
+#
+# True only for util-linux setpriv. BusyBox (Alpine) ships an applet with the same name that
+# cannot change uid/gid, so the command being present is not enough.
+#
+##############################################################################
+has_setpriv() {
+
+    command -v setpriv >/dev/null 2>&1 && setpriv --help 2>&1 | grep -q -- '--reuid'
+
+}
+
+
+##############################################################################
+#
 # Function: run_as_user
 #
 # Runs a command as another user, picking the first available tool:
@@ -161,7 +178,7 @@ run_as_user() {
 
     if [[ "$(id -un)" == "${user}" ]] || ! am_i_root; then
         "$@"
-    elif command -v setpriv >/dev/null 2>&1; then
+    elif has_setpriv; then
         setpriv --reuid="${user}" --regid="${user}" --init-groups "$@"
     elif command -v runuser >/dev/null 2>&1; then
         runuser -u "${user}" -- "$@"
@@ -214,7 +231,7 @@ exec_as_user() {
 
     local user="${1:?user required}" group="${2:?group required}"; shift 2
 
-    if command -v setpriv >/dev/null 2>&1; then
+    if has_setpriv; then
         exec setpriv --reuid="${user}" --regid="${group}" --init-groups "$@"
     elif command -v gosu >/dev/null 2>&1; then
         exec gosu "${user}:${group}" "$@"
@@ -225,7 +242,7 @@ exec_as_user() {
         exec runuser -u "${user}" -- "$@"
     fi
 
-    log_event "error" "No tool available to drop privileges (install util-linux, gosu or su-exec)"
+    log_event "error" "No tool available to drop privileges (install util-linux's setpriv, gosu or su-exec; on Alpine: apk add su-exec)"
     return 1
 
 }

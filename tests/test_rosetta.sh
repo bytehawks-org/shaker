@@ -48,13 +48,19 @@ printf '[server]\nport = 9001\n[auth]\npassword = "ini-pw"\n' > "${t}/app.ini"
 out="$(CFG="${t}/app.ini"; resolve; rosetta_print export)"
 assert_contains "BH_APP_PORT=9001" "${out}" "ini section.key"
 assert_contains "BH_APP_PASSWORD=ini-pw" "${out}" "ini quotes stripped"
+have_json() { command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; }
+have_yaml() { { command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; } || command -v yq >/dev/null 2>&1; }
+if have_json; then
 printf '{"server":{"port":9002},"auth":{"password":"json-pw"},"mode":"fast"}' > "${t}/app.json"
 out="$(CFG="${t}/app.json"; resolve; rosetta_print export)"
 assert_contains "BH_APP_PORT=9002" "${out}" "json nested"
 assert_contains "BH_APP_MODE=fast" "${out}" "json enum"
+else echo "  (json tests skipped: neither jq nor python3)"; fi
+if have_yaml; then
 printf 'server:\n  port: 9003\nauth:\n  password: yaml-pw\n' > "${t}/app.yaml"
 out="$(CFG="${t}/app.yaml"; resolve; rosetta_print export)"
 assert_contains "BH_APP_PORT=9003" "${out}" "yaml nested"
+else echo "  (yaml tests skipped: neither python3+PyYAML nor yq)"; fi
 # env beats config file
 out="$(export BH_APP_PORT=1234; CFG="${t}/app.ini"; resolve; rosetta_print export)"
 assert_contains "BH_APP_PORT=1234" "${out}" "env > config"

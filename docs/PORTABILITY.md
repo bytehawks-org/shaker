@@ -53,6 +53,12 @@ macOS/BSD/Windows are out of scope.
 7. Every function that touches the system has a test hook or runs under `BH_SHAKER_DRY_RUN`/temp dirs.
 8. Logs to stderr, results to stdout.
 
+## Alpine / BusyBox specifics
+
+* BusyBox has a `setpriv` applet that **cannot** change uid/gid. Shaker checks for util-linux's (`--reuid`);
+  on Alpine install `su-exec` (`apk add su-exec`) or `util-linux`.
+* Optional tools: `apk add jq python3 py3-yaml` for JSON/YAML configuration files.
+
 ## Bash on Alpine / busybox images
 
 ```dockerfile

@@ -156,6 +156,7 @@ detect_os() {
         # Subshell: os-release is shell syntax by specification, but its variables
         # must not leak into (or overwrite) the caller's environment.
         local parsed
+        # shellcheck disable=SC1090  # os-release is read on purpose, in a subshell
         parsed="$( . "${release_file}" 2>/dev/null; \
                    printf '%s\n%s\n%s\n%s\n%s\n' \
                           "${ID:-unknown}" "${ID_LIKE:-}" "${NAME:-unknown}" \

@@ -3,6 +3,18 @@
 All notable changes to Shaker. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/) (pre-1.0: minor versions may break).
 
+## [0.3.1] - 2026-10-23
+
+### Fixed (found by the first CI run on GitHub)
+- Alpine / BusyBox: `setpriv` exists but cannot change uid/gid; `exec_as_user` and `run_as_user` now require the
+  util-linux implementation (`has_setpriv`) and fall back to `gosu`/`su-exec` (`apk add su-exec`).
+- `groupadd` flags built with an unquoted command substitution (shellcheck SC2046).
+- Tests: JSON/YAML configuration tests are skipped when neither `jq`/`python3` nor `python3`+PyYAML/`yq` exist, so
+  the suite passes on minimal images (verified with a PATH without python3, jq and yq).
+- CI: `shellcheck` fails only on warnings and above (the `. "${dir}/x.libsh"` info notices are expected);
+  the portability matrix no longer cancels the other distributions when one fails (`fail-fast: false`) and
+  installs the optional tools on Alpine and Debian.
+
 ## [0.3.0] - 2026-10-23
 
 ### Added
