@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# file.libsh - file content helpers and template rendering.
+# Equivalent of Bitnami's libfile.sh / render-template. Pure bash: no sed -i,
+# envsubst or perl required.
+
+
+##############################################################################
+#
+# Function: replace_in_file
+#
+# Replaces every occurrence of a LITERAL string (not a regex) in a file, in
+# place. Safe with any character in pattern and replacement.
+#
+# Usage:
+#   replace_in_file <file> <old> <new>
+#
+# Returns:
+#   0 on success (also when nothing matched), 1 on I/O error.
+#
+##############################################################################
+replace_in_file() {
+
+    local file="${1:?file required}" old="${2?old string required}" new="${3-}" content
+
+    [[ -n "${old}" ]] || { log_event "error" "replace_in_file: empty search string"; return 1; }
+    content="$(cat "${file}"; printf x)" || return 1
+    content="${content%x}"
+    printf '%s' "${content//"${old}"/"${new}"}" > "${file}"
+
+}
+
+
+##############################################################################
+#
+# Function: ensure_line_in_file
+#
+# Appends a line to a file only when no identical line is already present.
+#
+# Usage:
+#   ensure_line_in_file <file> <line>
+#
+##############################################################################
+ensure_line_in_file() {
+
+    local file="${1:?file required}" line="${2?line required}"
+
+    [[ -f "${file}" ]] && grep -qxF -- "${line}" "${file}" && return 0
+    printf '%s\n' "${line}" >> "${file}"
+
+}
+
+
+##############################################################################
+#
+# Function: render_template
+#
+# Renders a template replacing {{ NAME }} and {{ NAME:-default }} with the
+# value of the environment variable NAME. Values are inserted verbatim (no
+# escaping, no evaluation). A variable that is unset and has no default is an
+# error, so a broken configuration never silently reaches the application.
+#
+# Usage:
+#   render_template <template> [destination]      (stdout when no destination)
+#
+# Returns:
+#   0 on success, 1 if a variable is missing or the template is unreadable.
+#
+##############################################################################
+render_template() {
+
+    local template="${1:?template required}" dest="${2:-}"
+    local line out="" missing=0 name def
+    local re='\{\{[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?[[:space:]]*\}\}'
+
+    [[ -r "${template}" ]] || { log_event "error" "Template not readable: ${template}"; return 1; }
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        local rendered=""
+        while [[ "${line}" =~ ${re} ]]; do
+            name="${BASH_REMATCH[1]}"
+            def="${BASH_REMATCH[3]}"
+            def="${def%"${def##*[![:space:]]}"}"       # the regex swallows the blank before }}
+            rendered+="${line%%"${BASH_REMATCH[0]}"*}"
+            if [[ -n "${!name+x}" ]]; then
+                rendered+="${!name}"
+            elif [[ -n "${BASH_REMATCH[2]}" ]]; then
+                rendered+="${def}"
+            else
+                log_event "error" "Template ${template}: variable '${name}' is not set"
+                missing=1
+            fi
+            line="${line#*"${BASH_REMATCH[0]}"}"
+        done
+        out+="${rendered}${line}"$'\n'
+    done < "${template}"
+
+    (( missing == 0 )) || return 1
+
+    if [[ -n "${dest}" ]]; then
+        printf '%s' "${out}" > "${dest}"
+    else
+        printf '%s' "${out}"
+    fi
+
+}

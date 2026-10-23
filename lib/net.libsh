@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# net.libsh - network helpers. Equivalent of Bitnami's libnet.sh / wait-for-port.
+# Uses bash's /dev/tcp, so no nc/curl/telnet is required in the image.
+
+
+##############################################################################
+#
+# Function: is_port_open
+#
+# Returns 0 if a TCP connection to host:port succeeds within 2 seconds.
+#
+# Usage:
+#   is_port_open <host> <port>
+#
+##############################################################################
+is_port_open() {
+
+    local host="${1:?host required}" port="${2:?port required}"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null
+    else
+        ( exec 3<>"/dev/tcp/${host}/${port}" ) 2>/dev/null
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: wait_for_port
+#
+# Waits until host:port accepts connections.
+#
+# Usage:
+#   wait_for_port <host> <port> [timeout-seconds=30]
+#
+# Returns:
+#   0 when the port is open, 1 on timeout or invalid arguments.
+#
+##############################################################################
+wait_for_port() {
+
+    local host="${1:?host required}" port="${2:?port required}" timeout_s="${3:-30}"
+    local waited=0
+
+    is_port "${port}" || { log_event "error" "Invalid port '${port}'"; return 1; }
+
+    until is_port_open "${host}" "${port}"; do
+        if (( waited >= timeout_s )); then
+            log_event "error" "Timeout waiting for ${host}:${port} after ${timeout_s}s"
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log_event "debug" "${host}:${port} is open"
+
+}

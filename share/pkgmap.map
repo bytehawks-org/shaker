@@ -1,0 +1,26 @@
+# logical|family|real-name   ("-" = not needed on that family)
+ca-certificates|debian|ca-certificates
+ca-certificates|rhel|ca-certificates
+ca-certificates|suse|ca-certificates
+ca-certificates|alpine|ca-certificates
+ca-certificates|arch|ca-certificates
+openssl-dev|debian|libssl-dev
+openssl-dev|rhel|openssl-devel
+openssl-dev|suse|libopenssl-devel
+openssl-dev|alpine|openssl-dev
+openssl-dev|arch|openssl
+build-essential|debian|build-essential
+build-essential|rhel|gcc make
+build-essential|suse|gcc make
+build-essential|alpine|build-base
+build-essential|arch|base-devel
+tzdata|debian|tzdata
+tzdata|rhel|tzdata
+tzdata|suse|timezone
+tzdata|alpine|tzdata
+tzdata|arch|tzdata
+procps|debian|procps
+procps|rhel|procps-ng
+procps|suse|procps
+procps|alpine|procps
+procps|arch|procps-ng

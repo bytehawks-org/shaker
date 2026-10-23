@@ -1,164 +1,325 @@
 #!/usr/bin/env bash
-
+#
+# os.libsh - environment detection (deployment, OS, family, init, arch, libc,
+# package manager). Works on any Linux distribution, with or without systemd.
+#
+# Test hooks (never needed in production):
+#   BH_SHAKER_OS_RELEASE_FILE  - alternative path of os-release
+#   BH_SHAKER_PROC_ROOT        - alternative root for /proc, /sys, /run, / markers
 
 
 ##############################################################################
 #
 # Function: detect_deployment_environment
 #
-# Detects the current deployment environment and sets related environment
-# variables.
-#
-# This function checks if the system is running inside a virtual machine, 
-# a container, or on physical hardware. It uses `systemd-detect-virt` to 
-# determine the environment type.
+# Detects whether Shaker runs in a container, a virtual machine or on
+# physical hardware. systemd-detect-virt is used when available, otherwise
+# filesystem markers, cgroups and DMI data are inspected.
 #
 # Environment variables set:
-#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT: "vm", "container", or "physical"
-#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE: The specific VM or container type, or "physical"
-#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR: Set to "kubernetes" 
-#        if running inside a Kubernetes-managed container
-#
-# Returns:
-#   - 0 on successful detection
-#
-# Dependencies:
-#   - systemd-detect-virt
-# - normalize_boolean (function must be defined elsewhere)
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT: "container", "vm" or "physical"
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE: docker, podman, lxc, kvm, vmware, ...
+#   - BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR: "kubernetes" when applicable
 #
 ##############################################################################
 detect_deployment_environment() {
 
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
+    local root="${BH_SHAKER_PROC_ROOT:-}"
+    local env="physical" type="physical" orchestrator=""
+    local virt="" vendor=""
 
-        local IS_VIRTUAL_MACHINE=$(systemd-detect-virt --vm)
-        local IS_CONTAINER=$(systemd-detect-virt --container)
+    # 1. Containers: explicit markers first, they are the most reliable
+    if [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]]; then
+        env="container"; type="container"; orchestrator="kubernetes"
+    fi
 
-        if [[ $(normalize_boolean "${IS_VIRTUAL_MACHINE}") != "false"  ]]; then
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="vm"
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_VIRTUAL_MACHINE}"
-            return 0
-        elif [[ $(normalize_boolean "${IS_CONTAINER}") != "false" ]]; then
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="container"
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${IS_CONTAINER}"
+    if [[ "${env}" == "physical" ]]; then
+        if [[ -f "${root}/.dockerenv" ]]; then
+            env="container"; type="docker"
+        elif [[ -f "${root}/run/.containerenv" ]]; then
+            env="container"; type="podman"
+        elif [[ -n "${container:-}" ]]; then
+            env="container"; type="${container}"
+        elif command -v systemd-detect-virt >/dev/null 2>&1 \
+             && virt="$(systemd-detect-virt --container 2>/dev/null)" \
+             && [[ -n "${virt}" && "${virt}" != "none" ]]; then
+            env="container"; type="${virt}"
+        elif grep -qaE '(docker|kubepods|containerd|lxc|libpod)' "${root}/proc/1/cgroup" 2>/dev/null; then
+            env="container"; type="container"
+        fi
+    fi
 
-            if env | grep -q "KUBERNETES_SERVICE_HOST="; then
-                export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR="kubernetes"
-            fi
-            return 0
-        else
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="physical"
-            export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="physical"
-            return 0
+    # 2. Virtual machines
+    if [[ "${env}" == "physical" ]]; then
+        virt=""
+        if command -v systemd-detect-virt >/dev/null 2>&1; then
+            virt="$(systemd-detect-virt --vm 2>/dev/null || true)"
         fi
 
+        if [[ -z "${virt}" || "${virt}" == "none" ]]; then
+            virt=""
+            vendor="$(cat "${root}/sys/class/dmi/id/sys_vendor" "${root}/sys/class/dmi/id/product_name" 2>/dev/null || true)"
+            vendor="${vendor,,}"
+            case "${vendor}" in
+                *vmware*)                      virt="vmware" ;;
+                *virtualbox*|*innotek*)        virt="oracle" ;;
+                *qemu*|*kvm*|*"red hat"*)      virt="kvm" ;;
+                *microsoft*)                   virt="microsoft" ;;
+                *xen*)                         virt="xen" ;;
+                *amazon\ ec2*|*google*)        virt="vm" ;;
+            esac
+            if [[ -z "${virt}" ]] && grep -qw hypervisor "${root}/proc/cpuinfo" 2>/dev/null; then
+                virt="vm"
+            fi
+        fi
 
+        if [[ -n "${virt}" ]]; then
+            env="vm"; type="${virt}"
+        fi
     fi
+
+    export BH_SHAKER_DEPLOYMENT_ENVIRONMENT="${env}"
+    export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_TYPE="${type}"
+    if [[ -n "${orchestrator}" ]]; then
+        export BH_SHAKER_DEPLOYMENT_ENVIRONMENT_ORCHESTRATOR="${orchestrator}"
+    fi
+
+    return 0
 
 }
 
+
+##############################################################################
+#
+# Function: detect_init_system
+#
+# Detects the init system: systemd, openrc, sysv or none (typical of
+# containers where the entrypoint is PID 1).
+#
+# Environment variables set:
+#   - BH_SHAKER_INIT_SYSTEM
+#
+##############################################################################
+detect_init_system() {
+
+    local root="${BH_SHAKER_PROC_ROOT:-}"
+    local init="none"
+
+    if [[ -d "${root}/run/systemd/system" ]]; then
+        init="systemd"
+    elif [[ -d "${root}/run/openrc" || -f "${root}/sbin/openrc-run" ]] \
+         && [[ "${BH_SHAKER_DEPLOYMENT_ENVIRONMENT:-}" != "container" ]]; then
+        init="openrc"
+    elif [[ -d "${root}/etc/init.d" ]] \
+         && [[ "${BH_SHAKER_DEPLOYMENT_ENVIRONMENT:-}" != "container" ]]; then
+        init="sysv"
+    fi
+
+    export BH_SHAKER_INIT_SYSTEM="${init}"
+    return 0
+
+}
 
 
 ##############################################################################
 #
 # Function: detect_os
 #
-# Detects the operating system and its version information, and exports
-# the results as environment variables for use in other scripts.
-#
-# The function attempts to determine the following details:
-#   - OS_NAME:        Human-readable name of the OS (e.g., "Ubuntu", "Fedora Linux")
-#   - OS_VERSION:     Full version string (e.g., "20.04.6 LTS (Focal Fossa)")
-#   - OS_ID:          Short identifier for the OS (e.g., "ubuntu", "centos", "alpine")
-#   - OS_VERSION_ID:  Short version identifier (e.g., "20.04", "8", "3.15")
+# Detects the operating system and exports normalized (lowercase) values.
+# /etc/os-release is parsed in a subshell, never by eval of its content on
+# the main shell.
 #
 # Detection order:
-#   1. If /etc/os-release exists (most modern systems), parse it for details.
-#   2. If lsb_release command is available (legacy systems), use it.
-#   3. Fallback to uname for basic system info.
+#   1. /etc/os-release (or /usr/lib/os-release)
+#   2. lsb_release
+#   3. uname
 #
-# The detected values are exported as the following environment variables:
-#   - BH_SHAKER_OS_NAME
-#   - BH_SHAKER_OS_VERSION
-#   - BH_SHAKER_OS_ID
-#   - BH_SHAKER_OS_VERSION_ID
-#
-# Returns:
-#   0 (success)
+# Environment variables set:
+#   - BH_SHAKER_OS_NAME, BH_SHAKER_OS_VERSION, BH_SHAKER_OS_ID,
+#     BH_SHAKER_OS_VERSION_ID
+#   - BH_SHAKER_OS_FAMILY: debian | rhel | suse | alpine | arch | unknown
+#   - BH_SHAKER_ARCH: amd64 | arm64 | armv7 | <uname -m>
+#   - BH_SHAKER_LIBC: glibc | musl | unknown
 #
 ##############################################################################
 detect_os() {
 
-    local OS_NAME="unknown"
-    local OS_VERSION="unknown"
-    local OS_ID="unknown"     # 'ubuntu', 'centos', 'alpine'
-    local OS_VERSION_ID="unknown"  # '20.04', '8', '3.15'
-    local OS_PKG_MANAGER="unknown"
+    local OS_NAME="unknown" OS_VERSION="unknown" OS_ID="unknown" OS_VERSION_ID="unknown"
+    local OS_ID_LIKE="" release_file=""
 
-    if [ -f /etc/os-release ]; then
-        # Modern and current systems
-        OS_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')                  # e.g. 'fedora'
-        OS_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')              # e.g. 'Fedora Linux'
-        OS_VERSION_ID=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')  # e.g. '43'
-        OS_VERSION=$(grep '^VERSION=' /etc/os-release | cut -d= -f2 | tr -d '"')        # e.g. '43 (KDE Plasma Desktop Edition)'
+    for release_file in "${BH_SHAKER_OS_RELEASE_FILE:-}" /etc/os-release /usr/lib/os-release; do
+        [[ -n "${release_file}" && -r "${release_file}" ]] && break
+        release_file=""
+    done
+
+    if [[ -n "${release_file}" ]]; then
+        # Subshell: os-release is shell syntax by specification, but its variables
+        # must not leak into (or overwrite) the caller's environment.
+        local parsed
+        parsed="$( . "${release_file}" 2>/dev/null; \
+                   printf '%s\n%s\n%s\n%s\n%s\n' \
+                          "${ID:-unknown}" "${ID_LIKE:-}" "${NAME:-unknown}" \
+                          "${VERSION:-${VERSION_ID:-unknown}}" "${VERSION_ID:-unknown}" )"
+        { read -r OS_ID; read -r OS_ID_LIKE; read -r OS_NAME; read -r OS_VERSION; read -r OS_VERSION_ID; } <<< "${parsed}"
     elif command -v lsb_release >/dev/null 2>&1; then
-        # Old and legacy systems
-        OS_ID=$($(lsb_release -si) | tr '[:upper:]' '[:lower:]')
-        OS_NAME=$(lsb_release -si)
-        OS_VERSION_ID=$(lsb_release -sr)
-        OS_VERSION=$(lsb_release -sd)
+        OS_NAME="$(lsb_release -si)"
+        OS_ID="${OS_NAME}"
+        OS_VERSION_ID="$(lsb_release -sr)"
+        OS_VERSION="$(lsb_release -sd)"
     else
-        # Fallback
-        OS_NAME=$(uname -s)
-        OS_VERSION=$(uname -r)
+        OS_NAME="$(uname -s)"
+        OS_ID="${OS_NAME}"
+        OS_VERSION="$(uname -r)"
     fi
 
-    # Export normalized values
-    export BH_SHAKER_OS_NAME=$(normalize_case "lower" "${OS_NAME}")
-    export BH_SHAKER_OS_VERSION=$(normalize_case "lower" "${OS_VERSION}")
-    export BH_SHAKER_OS_ID=$(normalize_case "lower" "${OS_ID}")
-    export BH_SHAKER_OS_VERSION_ID=$(normalize_case "lower" "${OS_VERSION_ID}")
+    export BH_SHAKER_OS_NAME="${OS_NAME,,}"
+    export BH_SHAKER_OS_VERSION="${OS_VERSION,,}"
+    export BH_SHAKER_OS_ID="${OS_ID,,}"
+    export BH_SHAKER_OS_VERSION_ID="${OS_VERSION_ID,,}"
+    export BH_SHAKER_OS_FAMILY
+    BH_SHAKER_OS_FAMILY="$(os_family_of "${OS_ID,,}" "${OS_ID_LIKE,,}")"
+
+    detect_arch
+    detect_libc
     return 0
 
 }
 
+
+##############################################################################
+#
+# Function: os_family_of
+#
+# Maps an os-release ID / ID_LIKE pair to a package family.
+#
+# Usage:
+#   os_family_of <id> [id_like]
+#
+##############################################################################
+os_family_of() {
+
+    local candidate
+
+    for candidate in ${1:-} ${2:-}; do
+        case "${candidate}" in
+            debian|ubuntu|linuxmint|raspbian|kali|pop)          echo "debian"; return 0 ;;
+            rhel|centos|fedora|rocky|almalinux|ol|amzn|photon|mariner|azurelinux|cbl-mariner)
+                                                                echo "rhel";   return 0 ;;
+            suse|opensuse*|sles|sled)                           echo "suse";   return 0 ;;
+            alpine)                                             echo "alpine"; return 0 ;;
+            arch|manjaro|endeavouros)                           echo "arch";   return 0 ;;
+        esac
+    done
+
+    echo "unknown"
+
+}
+
+
+##############################################################################
+#
+# Function: detect_arch
+#
+# Exports BH_SHAKER_ARCH using the Go/OCI naming (amd64, arm64, armv7).
+#
+##############################################################################
+detect_arch() {
+
+    local machine
+    machine="$(uname -m)"
+
+    case "${machine}" in
+        x86_64|amd64)        export BH_SHAKER_ARCH="amd64" ;;
+        aarch64|arm64)       export BH_SHAKER_ARCH="arm64" ;;
+        armv7*|armhf)        export BH_SHAKER_ARCH="armv7" ;;
+        *)                   export BH_SHAKER_ARCH="${machine}" ;;
+    esac
+
+}
+
+
+##############################################################################
+#
+# Function: detect_libc
+#
+# Exports BH_SHAKER_LIBC (glibc | musl | unknown). Statically linked
+# Distillery artifacts do not depend on it, dynamically linked ones do.
+#
+##############################################################################
+detect_libc() {
+
+    local libc="unknown" out
+
+    if compgen -G "/lib/ld-musl-*" >/dev/null 2>&1 || compgen -G "/usr/lib/ld-musl-*" >/dev/null 2>&1; then
+        libc="musl"
+    elif command -v getconf >/dev/null 2>&1 && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+        libc="glibc"
+    elif command -v ldd >/dev/null 2>&1; then
+        out="$(ldd --version 2>&1 || true)"
+        case "${out,,}" in
+            *musl*)            libc="musl" ;;
+            *glibc*|*"gnu libc"*) libc="glibc" ;;
+        esac
+    fi
+
+    export BH_SHAKER_LIBC="${libc}"
+
+}
 
 
 ##############################################################################
 #
 # Function: detect_package_manager
 #
-# Detects the available package manager on the system from a predefined list 
-# of known package managers (dnf, yum, tdnf, microdnf, apt-get, apt, pacman,
-# zypper, apk). Sets and exports two environment variables:
-#   - BH_SHAKER_OS_PKG_MANAGER: the name of the detected package manager
-#   - BH_SHAKER_OS_PKG_MANAGER_PATH: the full path to the detected package manager
+# Detects the package manager. The OS family decides the preference order,
+# then every known manager is tried, so unknown derivatives still work.
 #
-# Both variables are normalized to lowercase using the normalize_case function. 
-# If no known package manager is found, both variables are set to
-# "unknown".
-#
-# Returns:
-#   0 (success)
+# Environment variables set:
+#   - BH_SHAKER_OS_PKG_MANAGER: dnf, yum, tdnf, microdnf, apt-get, zypper, apk, pacman
+#   - BH_SHAKER_OS_PKG_MANAGER_PATH
 #
 ##############################################################################
 detect_package_manager() {
 
-    local PKG_MANAGER="unknown"
-    local PKG_MANAGER_PATH="unknown"
-    local PKG_KNOWN_MANAGERS=("dnf" "yum" "tdnf" "microdnf" "apt-get" "apt" "pacman" "zypper" "apk")
+    local pkg_mgr preferred
+    local PKG_MANAGER="unknown" PKG_MANAGER_PATH="unknown"
 
-    for pkg_mgr in "${PKG_KNOWN_MANAGERS[@]}"; do
+    case "${BH_SHAKER_OS_FAMILY:-unknown}" in
+        debian) preferred="apt-get" ;;
+        rhel)   preferred="dnf microdnf tdnf yum" ;;
+        suse)   preferred="zypper" ;;
+        alpine) preferred="apk" ;;
+        arch)   preferred="pacman" ;;
+        *)      preferred="" ;;
+    esac
+
+    for pkg_mgr in ${preferred} dnf microdnf tdnf yum apt-get zypper apk pacman; do
         if command -v "${pkg_mgr}" >/dev/null 2>&1; then
             PKG_MANAGER="${pkg_mgr}"
-            PKG_MANAGER_PATH=$(command -v "${pkg_mgr}")
+            PKG_MANAGER_PATH="$(command -v "${pkg_mgr}")"
             break
         fi
     done
 
-    # Export normalized values
-    export BH_SHAKER_OS_PKG_MANAGER=$(normalize_case "lower" "${PKG_MANAGER}")
-    export BH_SHAKER_OS_PKG_MANAGER_PATH=$(normalize_case "lower" "${PKG_MANAGER_PATH}")
+    export BH_SHAKER_OS_PKG_MANAGER="${PKG_MANAGER}"
+    export BH_SHAKER_OS_PKG_MANAGER_PATH="${PKG_MANAGER_PATH}"
     return 0
 
-}   
+}
+
+
+##############################################################################
+#
+# Function: detect_all
+#
+# Runs every detection in dependency order.
+#
+##############################################################################
+detect_all() {
+
+    detect_deployment_environment
+    detect_init_system
+    detect_os
+    detect_package_manager
+
+}

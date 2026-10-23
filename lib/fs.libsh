@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+#
+# fs.libsh - filesystem, user and permission helpers.
+# Equivalent of Bitnami's libfs.sh and the user helpers of libos.sh.
+# Only POSIX options of find/chmod/chown are used (busybox compatible).
+
+
+##############################################################################
+#
+# Function: am_i_root
+#
+# Returns 0 when running as uid 0.
+#
+##############################################################################
+am_i_root() {
+    [[ "${EUID}" -eq 0 ]]
+}
+
+
+##############################################################################
+#
+# Function: is_dir_empty
+#
+# Returns 0 if the directory does not exist or has no entries (hidden files
+# included).
+#
+##############################################################################
+is_dir_empty() {
+
+    local dir="${1:?directory required}"
+
+    [[ ! -d "${dir}" ]] && return 0
+    [[ -z "$(ls -A "${dir}" 2>/dev/null)" ]]
+
+}
+
+
+##############################################################################
+#
+# Function: ensure_dir_exists
+#
+# Creates a directory (with parents) and optionally sets owner and mode.
+#
+# Usage:
+#   ensure_dir_exists <dir> [owner[:group]] [mode]
+#
+##############################################################################
+ensure_dir_exists() {
+
+    local dir="${1:?directory required}" owner="${2:-}" mode="${3:-}"
+
+    mkdir -p "${dir}" || return 1
+    [[ -n "${mode}" ]]  && { chmod "${mode}" "${dir}" || return 1; }
+    [[ -n "${owner}" ]] && { chown "${owner}" "${dir}" || return 1; }
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: configure_permissions_ownership
+#
+# Recursively applies ownership and modes, separately for directories and
+# files. With group 0 and g+rwX it gives the OpenShift/arbitrary-uid behaviour
+# of Bitnami images (writable by any uid that belongs to the root group).
+#
+# Usage:
+#   configure_permissions_ownership <path> [-u user] [-g group] [-d dir-mode] [-f file-mode]
+#
+##############################################################################
+configure_permissions_ownership() {
+
+    local path="${1:?path required}" user="" group="" dmode="" fmode=""
+    shift
+
+    while (( $# > 0 )); do
+        case "$1" in
+            -u) user="$2";  shift 2 ;;
+            -g) group="$2"; shift 2 ;;
+            -d) dmode="$2"; shift 2 ;;
+            -f) fmode="$2"; shift 2 ;;
+            *)  log_event "error" "configure_permissions_ownership: unknown option '$1'"; return 1 ;;
+        esac
+    done
+
+    [[ -e "${path}" ]] || { log_event "error" "Path not found: ${path}"; return 1; }
+
+    if [[ -n "${user}${group}" ]]; then
+        chown -R "${user}${group:+:${group}}" "${path}" || return 1
+    fi
+    [[ -n "${dmode}" ]] && find "${path}" -type d -exec chmod "${dmode}" {} +
+    [[ -n "${fmode}" ]] && find "${path}" -type f -exec chmod "${fmode}" {} +
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: ensure_group_exists / ensure_user_exists
+#
+# Idempotently create a system group / user, using useradd/groupadd where
+# available and the busybox addgroup/adduser otherwise.
+#
+# Usage:
+#   ensure_group_exists <name> [gid]
+#   ensure_user_exists  <name> [uid] [group] [home]
+#
+##############################################################################
+ensure_group_exists() {
+
+    local name="${1:?group name required}" gid="${2:-}"
+
+    getent group "${name}" >/dev/null 2>&1 && return 0
+
+    if command -v groupadd >/dev/null 2>&1; then
+        groupadd -r ${gid:+-g "${gid}"} "${name}"
+    else
+        addgroup -S ${gid:+-g "${gid}"} "${name}"
+    fi
+
+}
+
+ensure_user_exists() {
+
+    local name="${1:?user name required}" uid="${2:-}" group="${3:-}" home="${4:-}"
+
+    id -u "${name}" >/dev/null 2>&1 && return 0
+    [[ -n "${group}" ]] && ensure_group_exists "${group}"
+
+    if command -v useradd >/dev/null 2>&1; then
+        useradd -r -M -s /usr/sbin/nologin \
+            ${uid:+-u "${uid}"} ${group:+-g "${group}"} ${home:+-d "${home}"} "${name}"
+    else
+        adduser -S -D -H -s /sbin/nologin \
+            ${uid:+-u "${uid}"} ${group:+-G "${group}"} ${home:+-h "${home}"} "${name}"
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: run_as_user
+#
+# Runs a command as another user, picking the first available tool:
+# setpriv, runuser, gosu, su-exec, su. When already that user (or when the
+# caller is not root) the command is executed directly.
+#
+# Usage:
+#   run_as_user <user> <command> [args...]
+#
+##############################################################################
+run_as_user() {
+
+    local user="${1:?user required}"; shift
+
+    if [[ "$(id -un)" == "${user}" ]] || ! am_i_root; then
+        "$@"
+    elif command -v setpriv >/dev/null 2>&1; then
+        setpriv --reuid="${user}" --regid="${user}" --init-groups "$@"
+    elif command -v runuser >/dev/null 2>&1; then
+        runuser -u "${user}" -- "$@"
+    elif command -v gosu >/dev/null 2>&1; then
+        gosu "${user}" "$@"
+    elif command -v su-exec >/dev/null 2>&1; then
+        su-exec "${user}" "$@"
+    else
+        su -s /bin/sh "${user}" -c "$(printf '%q ' "$@")"
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: generate_random_string
+#
+# Prints a random alphanumeric string.
+#
+# Usage:
+#   generate_random_string [length=32]
+#
+##############################################################################
+generate_random_string() {
+
+    local length="${1:-32}"
+
+    # tr gets SIGPIPE when head closes the pipe: ignore it in a subshell
+    ( set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${length}" )
+    echo
+
+}

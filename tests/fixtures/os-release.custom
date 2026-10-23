@@ -1,0 +1,4 @@
+NAME="Acme OS"
+ID=acme
+ID_LIKE="ubuntu debian"
+VERSION_ID=1

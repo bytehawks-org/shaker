@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# core.libsh - bootstrap, filesystem layout and compatibility checks.
+#
+# Layout (shared with Distillery):
+#   /opt/bytehawks              BH_ROOT   (real path, never baked into binaries via /opt/bh)
+#   /opt/bh -> /opt/bytehawks   BH_LINK   (convenience symlink)
+#   /opt/bytehawks/core         BH_CORE   (distillery + shaker live here)
+#   /opt/bytehawks/deps         BH_DEPS   (libraries built by Distillery)
+#   /opt/bytehawks/etc          BH_ETC    (per-package configuration, legacy hosts)
+#   /opt/bytehawks/var          BH_VAR    (state, logs)
+#   /opt/bytehawks/<package>    application prefix (Distillery)
+#
+# Shaker itself is relocatable: its own location is derived from this file,
+# BH_ROOT is only used to find Bytehawks packages and configuration.
+# Reserved package names (they would collide with the layout): core deps etc var.
+#
+# Portability: bash >= 4.2 only. No GNU-only tool flags (realpath, sed -i,
+# date %N, grep -P) are used anywhere in the library.
+
+if [[ -z "${BASH_VERSINFO[0]:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2) )); then
+    printf 'shaker: bash >= 4.2 is required (found %s)\n' "${BASH_VERSION:-none}" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+
+##############################################################################
+#
+# Function: shaker_resolve_path
+#
+# Resolves symlinks and returns the absolute physical path of a file, without
+# relying on realpath/readlink -f (missing on old systems and busybox).
+#
+# Arguments:
+#   $1 - Path to resolve.
+#
+##############################################################################
+shaker_resolve_path() {
+
+    local target="$1" dir
+
+    while [[ -L "${target}" ]]; do
+        dir="$(cd -P "$(dirname "${target}")" && pwd)"
+        target="$(readlink "${target}")"
+        [[ "${target}" == /* ]] || target="${dir}/${target}"
+    done
+
+    dir="$(cd -P "$(dirname "${target}")" && pwd)"
+    printf '%s/%s\n' "${dir}" "$(basename "${target}")"
+
+}
+
+
+##############################################################################
+#
+# Function: shaker_init_paths
+#
+# Computes and exports every path used by Shaker and by Bytehawks packages.
+# All of them can be overridden from the environment before the call.
+#
+# Environment variables set:
+#   BH_ROOT BH_LINK BH_CORE BH_DEPS BH_ETC BH_VAR BH_STATE
+#   BH_SHAKER_HOME BH_SHAKER_LIB_FOLDER BH_SHAKER_ASSETS_FOLDER BH_SHAKER_SHARE_FOLDER
+#   (BH_SHAKER_BASE_FOLDER is kept as a legacy alias of BH_SHAKER_HOME)
+#
+# Internal (unexported, survive cleanup_bh_shaker_env_vars):
+#   SHAKER_HOME SHAKER_LIB SHAKER_ASSETS SHAKER_SHARE
+#
+##############################################################################
+shaker_init_paths() {
+
+    local self
+    self="$(shaker_resolve_path "${BASH_SOURCE[0]}")"
+
+    SHAKER_LIB="$(dirname "${self}")"
+    SHAKER_HOME="$(dirname "${SHAKER_LIB}")"
+    SHAKER_ASSETS="${SHAKER_HOME}/assets"
+    SHAKER_SHARE="${SHAKER_HOME}/share"
+
+    export BH_ROOT="${BH_ROOT:-/opt/bytehawks}"
+    export BH_LINK="${BH_LINK:-/opt/bh}"
+    export BH_CORE="${BH_CORE:-${BH_ROOT}/core}"
+    export BH_DEPS="${BH_DEPS:-${BH_ROOT}/deps}"
+    export BH_ETC="${BH_ETC:-${BH_ROOT}/etc}"
+    export BH_VAR="${BH_VAR:-${BH_ROOT}/var}"
+    export BH_STATE="${BH_STATE:-${BH_VAR}/lib/shaker}"
+
+    export BH_SHAKER_HOME="${SHAKER_HOME}"
+    export BH_SHAKER_BASE_FOLDER="${SHAKER_HOME}"
+    export BH_SHAKER_LIB_FOLDER="${SHAKER_LIB}"
+    export BH_SHAKER_ASSETS_FOLDER="${SHAKER_ASSETS}"
+    export BH_SHAKER_SHARE_FOLDER="${SHAKER_SHARE}"
+
+}
+
+
+##############################################################################
+#
+# Function: shaker_version
+#
+# Prints the Shaker version read from the VERSION file.
+#
+##############################################################################
+shaker_version() {
+
+    if [[ -r "${SHAKER_HOME}/VERSION" ]]; then
+        tr -d '[:space:]' < "${SHAKER_HOME}/VERSION"
+        echo
+    else
+        echo "unknown"
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: shaker_bootstrap
+#
+# Creates the Bytehawks directory layout and the BH_LINK convenience symlink.
+# Idempotent. An existing BH_LINK that is not a symlink is never touched.
+#
+# Returns:
+#   0 on success, 1 if the layout cannot be created.
+#
+##############################################################################
+shaker_bootstrap() {
+
+    local dir
+
+    for dir in "${BH_ROOT}" "${BH_CORE}" "${BH_DEPS}" "${BH_ETC}" "${BH_VAR}" \
+               "${BH_STATE}" "${BH_VAR}/log"; do
+        if ! mkdir -p "${dir}"; then
+            log_event "error" "Cannot create ${dir} (are you root?)"
+            return 1
+        fi
+    done
+
+    if [[ -L "${BH_LINK}" ]]; then
+        log_event "debug" "${BH_LINK} already a symlink -> $(readlink "${BH_LINK}")"
+    elif [[ -e "${BH_LINK}" ]]; then
+        log_event "warn" "${BH_LINK} exists and is not a symlink: left untouched"
+    elif ! ln -s "${BH_ROOT}" "${BH_LINK}"; then
+        log_event "error" "Cannot create symlink ${BH_LINK} -> ${BH_ROOT}"
+        return 1
+    fi
+
+    return 0
+
+}
+
+
+shaker_init_paths
