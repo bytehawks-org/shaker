@@ -104,3 +104,79 @@ render_template() {
     fi
 
 }
+
+
+##############################################################################
+#
+# Function: expand_vars
+#
+# Expands ${NAME} and ${NAME:-default} in a string from the environment. Used
+# for the runtime.spec fields written by Distillery (run command, healthcheck,
+# paths). Nothing is evaluated: no command substitution, no globbing.
+#
+# Usage:
+#   expand_vars <string>
+#
+# Returns:
+#   0 and prints the result; 1 if a variable is unset and has no default.
+#
+##############################################################################
+expand_vars() {
+
+    local rest="${1-}" out="" name def
+    local re='\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}'
+
+    while [[ "${rest}" =~ ${re} ]]; do
+        name="${BASH_REMATCH[1]}"
+        def="${BASH_REMATCH[3]}"
+        out+="${rest%%"${BASH_REMATCH[0]}"*}"
+        if [[ -n "${!name:-}" ]]; then
+            out+="${!name}"
+        elif [[ -n "${BASH_REMATCH[2]}" ]]; then
+            out+="${def}"
+        else
+            log_event "error" "Variable '${name}' is not set (needed by: ${1})"
+            return 1
+        fi
+        rest="${rest#*"${BASH_REMATCH[0]}"}"
+    done
+
+    printf '%s' "${out}${rest}"
+
+}
+
+
+##############################################################################
+#
+# Function: sha256_of_file / sha256_of_string
+#
+# Portable SHA-256 (sha256sum, shasum, openssl, busybox). Prints the hex digest.
+#
+##############################################################################
+_sha256_pipe() {
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 | sed 's/^.*= //'
+    else
+        log_event "error" "No SHA-256 tool found (sha256sum, shasum or openssl)"
+        return 1
+    fi
+
+}
+
+sha256_of_file() {
+
+    [[ -r "${1:?file required}" ]] || return 1
+    _sha256_pipe < "$1"
+
+}
+
+sha256_of_string() {
+
+    printf '%s' "${1-}" | _sha256_pipe
+
+}

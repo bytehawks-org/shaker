@@ -115,7 +115,7 @@ ensure_group_exists() {
     getent group "${name}" >/dev/null 2>&1 && return 0
 
     if command -v groupadd >/dev/null 2>&1; then
-        groupadd -r ${gid:+-g "${gid}"} "${name}"
+        groupadd $([[ -z "${gid}" || "${gid}" -lt 1000 ]] && echo -r) ${gid:+-g "${gid}"} "${name}"
     else
         addgroup -S ${gid:+-g "${gid}"} "${name}"
     fi
@@ -130,7 +130,10 @@ ensure_user_exists() {
     [[ -n "${group}" ]] && ensure_group_exists "${group}"
 
     if command -v useradd >/dev/null 2>&1; then
-        useradd -r -M -s /usr/sbin/nologin \
+        local sysflag=()
+        # -r (system account) only below SYS_UID_MAX, otherwise useradd warns
+        if [[ -z "${uid}" || "${uid}" -lt 1000 ]]; then sysflag=(-r); fi
+        useradd "${sysflag[@]+"${sysflag[@]}"}" -M -s /usr/sbin/nologin \
             ${uid:+-u "${uid}"} ${group:+-g "${group}"} ${home:+-d "${home}"} "${name}"
     else
         adduser -S -D -H -s /sbin/nologin \
@@ -190,5 +193,98 @@ generate_random_string() {
     # tr gets SIGPIPE when head closes the pipe: ignore it in a subshell
     ( set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${length}" )
     echo
+
+}
+
+
+##############################################################################
+#
+# Function: exec_as_user
+#
+# Replaces the current process with a command running as another user, so the
+# service stays PID 1 and receives container signals. Prefers tools that exec
+# directly (setpriv, gosu, su-exec); runuser/su are a last resort because they
+# stay in between as a parent process.
+#
+# Usage:
+#   exec_as_user <uid|user> <gid|group> <command> [args...]
+#
+##############################################################################
+exec_as_user() {
+
+    local user="${1:?user required}" group="${2:?group required}"; shift 2
+
+    if command -v setpriv >/dev/null 2>&1; then
+        exec setpriv --reuid="${user}" --regid="${group}" --init-groups "$@"
+    elif command -v gosu >/dev/null 2>&1; then
+        exec gosu "${user}:${group}" "$@"
+    elif command -v su-exec >/dev/null 2>&1; then
+        exec su-exec "${user}:${group}" "$@"
+    elif command -v runuser >/dev/null 2>&1; then
+        log_event "warn" "setpriv/gosu/su-exec not found: using runuser, signals reach the service through a parent process"
+        exec runuser -u "${user}" -- "$@"
+    fi
+
+    log_event "error" "No tool available to drop privileges (install util-linux, gosu or su-exec)"
+    return 1
+
+}
+
+
+##############################################################################
+#
+# Function: ensure_passwd_entry
+#
+# Makes the current uid resolvable when the platform assigns an arbitrary uid
+# (OpenShift, restricted PodSecurity). Many programs (postgres, ssh, java,
+# whoami) fail when getpwuid() has no answer. Strategy, in order:
+#   1. /etc/passwd writable (group 0 convention): append an entry
+#   2. libnss_wrapper available: private passwd/group files + LD_PRELOAD
+#   3. warn and continue
+# Nothing is done for root or when the uid is already known.
+#
+# Usage:
+#   ensure_passwd_entry [name=bytehawks] [home=/tmp]
+#
+# Test hook: SHAKER_PASSWD_FILE / SHAKER_GROUP_FILE replace /etc/passwd and /etc/group.
+#
+##############################################################################
+ensure_passwd_entry() {
+
+    local name="${1:-bytehawks}" home="${2:-/tmp}"
+    local uid gid passwd="${SHAKER_PASSWD_FILE:-/etc/passwd}" group="${SHAKER_GROUP_FILE:-/etc/group}"
+    local nss_lib dir
+
+    uid="$(id -u)"; gid="$(id -g)"
+    (( uid == 0 )) && return 0
+
+    if [[ -r "${passwd}" ]] && grep -q "^[^:]*:[^:]*:${uid}:" "${passwd}"; then
+        return 0
+    fi
+
+    if [[ -w "${passwd}" ]]; then
+        printf '%s:x:%s:%s:%s user:%s:/sbin/nologin\n' "${name}" "${uid}" "${gid}" "${name}" "${home}" >> "${passwd}"
+        log_event "debug" "Added uid ${uid} to ${passwd}"
+        return 0
+    fi
+
+    for nss_lib in /usr/lib/libnss_wrapper.so /usr/lib64/libnss_wrapper.so /usr/lib/*/libnss_wrapper.so /usr/lib/libnss_wrapper.so.0; do
+        [[ -r "${nss_lib}" ]] && break
+        nss_lib=""
+    done
+
+    if [[ -n "${nss_lib}" ]]; then
+        dir="$(mktemp -d "${TMPDIR:-/tmp}/bh-nss.XXXXXX")" || return 1
+        cp "${passwd}" "${dir}/passwd" 2>/dev/null || : > "${dir}/passwd"
+        cp "${group}" "${dir}/group" 2>/dev/null || : > "${dir}/group"
+        printf '%s:x:%s:%s:%s user:%s:/sbin/nologin\n' "${name}" "${uid}" "${gid}" "${name}" "${home}" >> "${dir}/passwd"
+        export NSS_WRAPPER_PASSWD="${dir}/passwd" NSS_WRAPPER_GROUP="${dir}/group"
+        export LD_PRELOAD="${nss_lib}${LD_PRELOAD:+:${LD_PRELOAD}}"
+        log_event "debug" "uid ${uid} resolved through nss_wrapper (${nss_lib})"
+        return 0
+    fi
+
+    log_event "warn" "uid ${uid} has no passwd entry and neither a writable ${passwd} nor nss_wrapper is available"
+    return 0
 
 }

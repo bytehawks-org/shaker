@@ -17,20 +17,28 @@ shaker $(shaker_version)
 
 Usage: shaker <command> [options]
 
-  detect [--format=text|env]          show deployment, OS, init, arch, libc, package manager
-  env <package> [opts] [-- cmd...]    resolve parameters (CLI > ENV > ENV_FILE > alias > config > default)
-        --format=export|dotenv|explain   output format (default: export)
-        --map=FILE       Rosetta map (default: \$BH_ROOT/<package>/.bytehawks/rosetta.map)
-        --config=FILE    configuration file (default: auto-discovered for legacy hosts)
-        --validate       only validate, print nothing
-        --help-vars      describe the parameters of the package
-        --<flag>=value   any CLI flag declared in the map
-  exec <package> [opts] -- cmd...     resolve, export, clean framework vars and exec cmd
-  render <template> [dest]            render {{ VAR }} / {{ VAR:-default }} from the environment
+Lifecycle (driven by the Distillery bundle of the package):
+  install <pkg>              user, directories, permissions (root, once)
+  init <pkg> [opts]          parameters -> templates, persistence, hooks (idempotent, every start)
+  run <pkg> [opts] [-- args] init + start the service (PID 1; --daemon for hosts without supervisor)
+  stop <pkg>                 stop a service started with --daemon
+  verify <pkg> [--strict] [--no-health]   audit: user, permissions, parameters, drift, health
+  status <pkg>               what was applied and when
+  unit <pkg>                 print a hardened systemd unit
+
+Parameters (Rosetta):
+  env <pkg> [opts]           resolve CLI > ENV > ENV_FILE > alias > config file > default
+        --format=export|dotenv|explain   --validate   --help-vars
+        --config=FILE   --bundle=DIR   --map=FILE   --<flag>=value (flags declared by the package)
+  exec <pkg> [opts] -- cmd   resolve, export, clean framework variables, exec cmd
+
+Tools:
+  detect [--format=text|env]            deployment, OS, family, init, arch, libc, package manager
+  render <template> [dest]              render {{ VAR }} / {{ VAR:-default }} from the environment
   pkg <install|remove|update|clean|check> [names...]   distro-agnostic package management
-  hooks <dir>                         run init hooks in lexical order
-  wait-for <host> <port> [seconds]    wait for a TCP port
-  bootstrap                           create /opt/bytehawks layout and /opt/bh symlink
+  hooks <dir>                           run init hooks in lexical order
+  wait-for <host> <port> [seconds]      wait for a TCP port
+  bootstrap                             create the /opt/bytehawks layout and the /opt/bh symlink
   banner | version | help
 USAGE
 }
@@ -56,75 +64,52 @@ cmd_detect() {
 
 }
 
-# Shared by `env` and `exec`: parses options, loads map/config, resolves.
-# Sets SHAKER_FORMAT, SHAKER_VALIDATE_ONLY, SHAKER_HELP_VARS.
-resolve_package() {
-
-    local pkg="$1"; shift
-    local map="" config="" arg
-    local -a cli_args=()
-
-    SHAKER_FORMAT="export"; SHAKER_VALIDATE_ONLY="false"; SHAKER_HELP_VARS="false"
-    SHAKER_CMD=()
-
-    while (( $# > 0 )); do
-        arg="$1"; shift
-        case "${arg}" in
-            --format=*)  SHAKER_FORMAT="${arg#--format=}" ;;
-            --map=*)     map="${arg#--map=}" ;;
-            --config=*)  config="${arg#--config=}" ;;
-            --validate)  SHAKER_VALIDATE_ONLY="true" ;;
-            --help-vars) SHAKER_HELP_VARS="true" ;;
-            --)          SHAKER_CMD=("$@"); break ;;
-            *)           cli_args+=("${arg}") ;;
-        esac
-    done
-
-    [[ -n "${map}" ]] || map="${BH_ROOT}/${pkg}/.bytehawks/rosetta.map"
-
-    rosetta_reset
-    rosetta_load_map "${map}" || return 1
-
-    [[ "${SHAKER_HELP_VARS}" == "true" ]] && return 0
-
-    [[ -n "${config}" ]] || config="$(rosetta_find_config "${pkg}" || true)"
-    if [[ -n "${config}" ]]; then
-        rosetta_load_config "${config}" || return 1
-    else
-        log_event "debug" "No configuration file for ${pkg}: using environment and defaults only"
-    fi
-
-    rosetta_parse_cli "${cli_args[@]+"${cli_args[@]}"}" || return 1
-    rosetta_resolve
-
-}
-
 cmd_env() {
 
-    local pkg="${1:?package required}"; shift
+    lifecycle_parse_args "$@"
+    lifecycle_load || exit 1
+    lifecycle_resolve || exit 1
 
-    resolve_package "${pkg}" "$@" || exit 1
+    if [[ "${LC_HELP_VARS}" == "true" ]]; then rosetta_describe; return 0; fi
+    if [[ "${LC_VALIDATE_ONLY}" == "true" ]]; then return 0; fi
 
-    if [[ "${SHAKER_HELP_VARS}" == "true" ]]; then rosetta_describe; return 0; fi
-    if [[ "${SHAKER_VALIDATE_ONLY}" == "true" ]]; then return 0; fi
-
-    rosetta_print "${SHAKER_FORMAT}"
+    rosetta_print "${LC_FORMAT}"
 
 }
 
 cmd_exec() {
 
-    local pkg="${1:?package required}"; shift
+    lifecycle_parse_args "$@"
+    lifecycle_load || exit 1
+    lifecycle_resolve || exit 1
+    (( ${#LC_EXTRA[@]} > 0 )) || die "exec: command missing (use: shaker exec <package> [opts] -- cmd...)"
 
-    resolve_package "${pkg}" "$@" || exit 1
-    (( ${#SHAKER_CMD[@]} > 0 )) || die "exec: command missing (use: shaker exec <package> [opts] -- cmd...)"
-
-    rosetta_export
     if [[ "${BH_SHAKER_LOG_LEVEL:-}" == "debug" || "${BH_SHAKER_DEBUG:-}" == "true" ]]; then
         rosetta_print explain >&2
     fi
     cleanup_bh_shaker_env_vars
-    exec "${SHAKER_CMD[@]}"
+    exec "${LC_EXTRA[@]}"
+
+}
+
+# install / init / run / stop / verify / status / unit
+cmd_lifecycle() {
+
+    local verb="$1"; shift
+
+    lifecycle_parse_args "$@"
+    lifecycle_load || exit 1
+
+    case "${verb}" in
+        install) lifecycle_install ;;
+        stop)    lifecycle_stop ;;
+        status)  lifecycle_status ;;
+        unit)    lifecycle_unit ;;
+        init|run|verify)
+            lifecycle_resolve || { state_event "${LC_PKG}" "${verb}" fail parameters; exit 1; }
+            "lifecycle_${verb}"
+            ;;
+    esac
 
 }
 
@@ -137,6 +122,8 @@ main() {
         detect)     cmd_detect "$@" ;;
         env)        detect_all; cmd_env "$@" ;;
         exec)       detect_all; cmd_exec "$@" ;;
+        install|init|run|stop|verify|status|unit)
+                    detect_all; cmd_lifecycle "${command}" "$@" ;;
         render)     render_template "$@" ;;
         pkg)
             local op="${1:?pkg operation required}"; shift

@@ -17,6 +17,10 @@ _SHAKER_LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${_SHAKER_LIB_DIR}/net.libsh"
 . "${_SHAKER_LIB_DIR}/hook.libsh"
 . "${_SHAKER_LIB_DIR}/rosetta.libsh"
+. "${_SHAKER_LIB_DIR}/state.libsh"
+. "${_SHAKER_LIB_DIR}/service.libsh"
+. "${_SHAKER_LIB_DIR}/spec.libsh"
+. "${_SHAKER_LIB_DIR}/lifecycle.libsh"
 
 unset _SHAKER_LIB_DIR
 

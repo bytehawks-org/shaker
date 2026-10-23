@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+#
+# state.libsh - what Shaker has applied, when and from which build.
+#
+# One KEY=VALUE file per package plus an append-only event log:
+#   <state_dir>/<package>.state     installed_at, version, recipe, initialized_at, config_hash, ...
+#   <state_dir>/events.log          "<UTC timestamp> <package> <verb> <result> [detail]"
+#
+# The state directory is BH_STATE (default /opt/bytehawks/var/lib/shaker). When it is not writable
+# (arbitrary uid on a read-only layer) a private directory under TMPDIR is used instead, so the
+# lifecycle verbs keep working; the state is then ephemeral.
+
+
+##############################################################################
+#
+# Function: state_dir
+#
+# Prints the usable state directory, creating it if needed.
+#
+##############################################################################
+state_dir() {
+
+    local dir="${BH_STATE}"
+
+    if mkdir -p "${dir}" 2>/dev/null && [[ -w "${dir}" ]]; then
+        echo "${dir}"
+        return 0
+    fi
+
+    dir="${TMPDIR:-/tmp}/bytehawks-state-$(id -u)"
+    mkdir -p "${dir}" && chmod 0700 "${dir}" && echo "${dir}"
+
+}
+
+
+state_file() {
+    printf '%s/%s.state\n' "$(state_dir)" "${1:?package required}"
+}
+
+
+##############################################################################
+#
+# Function: state_get
+#
+# Prints the value of a key (nothing and rc 1 when absent).
+#
+# Usage:
+#   state_get <package> <key>
+#
+##############################################################################
+state_get() {
+
+    local file line
+    file="$(state_file "$1")"
+    [[ -r "${file}" ]] || return 1
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line%%=*}" == "$2" ]]; then
+            printf '%s\n' "${line#*=}"
+            return 0
+        fi
+    done < "${file}"
+
+    return 1
+
+}
+
+
+##############################################################################
+#
+# Function: state_set
+#
+# Sets one or more keys atomically (write to a temporary file, then rename).
+#
+# Usage:
+#   state_set <package> key=value [key=value...]
+#
+##############################################################################
+state_set() {
+
+    local pkg="$1"; shift
+    local file tmp line pair key found
+    local -a updates=("$@")
+
+    file="$(state_file "${pkg}")"
+    tmp="${file}.$$"
+    : > "${tmp}" || return 1
+
+    if [[ -r "${file}" ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            found=""
+            for pair in "${updates[@]}"; do
+                [[ "${line%%=*}" == "${pair%%=*}" ]] && { found=1; break; }
+            done
+            [[ -z "${found}" && -n "${line}" ]] && printf '%s\n' "${line}" >> "${tmp}"
+        done < "${file}"
+    fi
+
+    for pair in "${updates[@]}"; do
+        key="${pair%%=*}"
+        printf '%s=%s\n' "${key}" "${pair#*=}" >> "${tmp}"
+    done
+
+    mv -f "${tmp}" "${file}"
+
+}
+
+
+##############################################################################
+#
+# Function: state_unset
+#
+# Removes keys whose names start with the given prefix.
+#
+# Usage:
+#   state_unset <package> <key-prefix>
+#
+##############################################################################
+state_unset() {
+
+    local file tmp line
+    file="$(state_file "$1")"
+    [[ -r "${file}" ]] || return 0
+    tmp="${file}.$$"
+    : > "${tmp}"
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ "${line}" == "$2"* ]] || printf '%s\n' "${line}" >> "${tmp}"
+    done < "${file}"
+
+    mv -f "${tmp}" "${file}"
+
+}
+
+
+##############################################################################
+#
+# Function: state_event
+#
+# Appends a line to the event log (the audit trail of what Shaker did).
+#
+# Usage:
+#   state_event <package> <verb> <ok|fail|skip> [detail]
+#
+##############################################################################
+state_event() {
+
+    printf '%s %s %s %s%s\n' "$(state_now)" "$1" "$2" "$3" "${4:+ $4}" >> "$(state_dir)/events.log" 2>/dev/null || true
+
+}
+
+
+# UTC timestamp. date -u is POSIX; printf %(..)T would use the local time zone.
+state_now() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+}

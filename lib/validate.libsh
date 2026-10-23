@@ -127,8 +127,8 @@ is_secret_name() {
     local upper="${1^^}"
 
     [[ "${upper}" == *PASSWORD* || "${upper}" == *PASSWD* || "${upper}" == *SECRET* \
-    || "${upper}" == *TOKEN* || "${upper}" == *_KEY || "${upper}" == *_KEY_* \
-    || "${upper}" == *CREDENTIAL* ]]
+    || "${upper}" == TOKEN || "${upper}" == *_TOKEN || "${upper}" == *_TOKEN_* \
+    || "${upper}" == *_KEY || "${upper}" == *_KEY_* || "${upper}" == *CREDENTIAL* ]]
 
 }
 
