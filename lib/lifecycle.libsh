@@ -1,0 +1,717 @@
+#!/usr/bin/env bash
+#
+# lifecycle.libsh - the declarative package lifecycle: install, init, run, stop, verify,
+# status, unit. Everything is driven by the bundle that Distillery writes next to the
+# artifacts (rosetta.map, runtime.spec, manifest.json, assets/); nothing is hard-coded
+# per application. Equivalent of Bitnami's postunpack.sh / setup.sh / entrypoint.sh / run.sh.
+#
+#   install  once, as root (image build or provisioning): user, directories, permissions
+#   init     at every start: parameters -> templates, persistence, hooks (idempotent)
+#   run      init + exec of the service as PID 1 (privileges dropped to the declared user)
+#   stop     signal a service started with `run --daemon`
+#   verify   read-only audit: user, permissions, parameters, drift, health
+#   status   what Shaker has applied and when
+#   unit     print a hardened systemd unit
+#
+# Common options (parsed by lifecycle_parse_args):
+#   --bundle=DIR  --config=FILE  --no-init  --daemon  --strict  --no-health  --reinit
+#   -- command...  extra arguments appended to the service command
+#   any other --flag is matched against the `cli` column of the Rosetta map.
+
+
+LC_PKG=""; LC_CONFIG=""; LC_NO_INIT="false"; LC_DAEMON="false"; LC_STRICT="false"
+LC_NO_HEALTH="false"; LC_REINIT="false"; LC_FORMAT="export"; LC_VALIDATE_ONLY="false"; LC_HELP_VARS="false"
+LC_CLI=(); LC_EXTRA=(); LC_PASSTHROUGH=(); LC_MAP_OVERRIDE=""
+LC_OK=0; LC_WARN=0; LC_FAIL=0
+
+
+##############################################################################
+#
+# Function: lifecycle_parse_args
+#
+# Parses the arguments shared by every lifecycle verb into the LC_* globals.
+#
+# Usage:
+#   lifecycle_parse_args <package> [options...] [-- command...]
+#
+##############################################################################
+lifecycle_parse_args() {
+
+    LC_PKG="${1:?package required}"; shift
+    LC_CONFIG=""; LC_NO_INIT="false"; LC_DAEMON="false"; LC_STRICT="false"; LC_NO_HEALTH="false"
+    LC_REINIT="false"; LC_FORMAT="export"; LC_VALIDATE_ONLY="false"; LC_HELP_VARS="false"
+    LC_CLI=(); LC_EXTRA=(); LC_PASSTHROUGH=(); LC_MAP_OVERRIDE=""
+
+    local arg
+    while (( $# > 0 )); do
+        arg="$1"; shift
+        case "${arg}" in
+            --bundle=*)    export BH_SHAKER_BUNDLE="${arg#--bundle=}"; LC_PASSTHROUGH+=("${arg}") ;;
+            --map=*)       LC_MAP_OVERRIDE="${arg#--map=}" ;;
+            --config=*)    LC_CONFIG="${arg#--config=}"; LC_PASSTHROUGH+=("${arg}") ;;
+            --format=*)    LC_FORMAT="${arg#--format=}" ;;
+            --validate)    LC_VALIDATE_ONLY="true" ;;
+            --help-vars)   LC_HELP_VARS="true" ;;
+            --no-init)     LC_NO_INIT="true" ;;
+            --daemon)      LC_DAEMON="true" ;;
+            --strict)      LC_STRICT="true" ;;
+            --no-health)   LC_NO_HEALTH="true" ;;
+            --reinit)      LC_REINIT="true" ;;
+            --)            LC_EXTRA=("$@"); break ;;
+            *)             LC_CLI+=("${arg}"); LC_PASSTHROUGH+=("${arg}") ;;
+        esac
+    done
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_load
+#
+# Locates and loads the bundle of LC_PKG (spec + BH_PKG_* variables).
+#
+##############################################################################
+lifecycle_load() {
+
+    local bundle
+
+    if bundle="$(shaker_find_bundle "${LC_PKG}" 2>/dev/null)"; then
+        spec_load "${bundle}"
+    elif [[ -n "${LC_MAP_OVERRIDE}" ]]; then
+        spec_reset                      # parameters only: --map without a Distillery bundle
+    else
+        shaker_find_bundle "${LC_PKG}" >/dev/null
+        return 1
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_resolve
+#
+# Loads the Rosetta map of the bundle, the legacy configuration file, the CLI flags,
+# resolves and validates every parameter and exports the result.
+#
+# Returns:
+#   0 on success, 1 when a parameter is missing or invalid.
+#
+##############################################################################
+lifecycle_resolve() {
+
+    local map="${LC_MAP_OVERRIDE:-${SPEC_BUNDLE}/rosetta.map}" config="${LC_CONFIG}"
+
+    rosetta_reset
+    if [[ -r "${map}" ]]; then
+        rosetta_load_map "${map}" || return 1
+    else
+        log_event "debug" "No Rosetta map at ${map}: package has no parameters"
+    fi
+
+    [[ -n "${LC_HELP_VARS}" && "${LC_HELP_VARS}" == "true" ]] && return 0
+
+    [[ -n "${config}" ]] || config="$(rosetta_find_config "${LC_PKG}" || true)"
+    if [[ -n "${config}" ]]; then
+        rosetta_load_config "${config}" || return 1
+    else
+        log_event "debug" "No configuration file for ${LC_PKG}: environment and defaults only"
+    fi
+
+    rosetta_parse_cli "${LC_CLI[@]+"${LC_CLI[@]}"}" || return 1
+    rosetta_resolve || return 1
+    rosetta_export
+
+}
+
+
+# Hash of every resolved parameter (secrets included, only the digest is stored).
+lifecycle_config_hash() {
+
+    local env joined=""
+    for env in "${ROSETTA_ORDER[@]}"; do
+        joined+="${env}=${ROSETTA_VALUE[${env}]-}"$'\n'
+    done
+    sha256_of_string "${joined}"
+
+}
+
+
+# Resolves the group name of a numeric or named gid, creating it when missing.
+_lifecycle_group_name() {
+
+    local gid="$1" fallback="$2" name
+
+    if [[ "${gid}" =~ ^[0-9]+$ ]]; then
+        name="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
+        if [[ -z "${name}" ]]; then
+            ensure_group_exists "${fallback}" "${gid}" || return 1
+            name="${fallback}"
+        fi
+        echo "${name}"
+    else
+        ensure_group_exists "${gid}" || return 1
+        echo "${gid}"
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_install
+#
+# Applies the static part of the contract: service user and group, directories with
+# owner and mode, hook directories, state directory permissions. Idempotent. Fields of
+# the spec used here must not depend on runtime parameters.
+#
+# Notes:
+#   Ownership is recursive. A numeric mode is applied to the directory only, a symbolic
+#   one (g+rwX) recursively. With gid 0 and g+rwX any arbitrary uid of the root group can
+#   write: the OpenShift / restricted PodSecurity convention.
+#
+##############################################################################
+lifecycle_install() {
+
+    local entry path mode owner gname hook_dir
+
+    if ! am_i_root && ! is_boolean_yes "${BH_SHAKER_ALLOW_NONROOT:-false}"; then
+        log_event "error" "install requires root (set BH_SHAKER_ALLOW_NONROOT=true to skip ownership changes)"
+        return 1
+    fi
+
+    log_event "info" "Installing ${LC_PKG} ${BH_PKG_VERSION:-}"
+
+    if [[ -n "${SPEC_USER_NAME}" ]] && am_i_root; then
+        gname="$(_lifecycle_group_name "${SPEC_USER_GID}" "${SPEC_USER_NAME}")" || return 1
+        ensure_user_exists "${SPEC_USER_NAME}" "${SPEC_USER_UID}" "${gname}" "${SPEC_USER_HOME}" || return 1
+        log_event "info" "User ${SPEC_USER_NAME} (${SPEC_USER_UID}:${SPEC_USER_GID}) ready"
+    fi
+
+    for entry in "${SPEC_DIRS[@]+"${SPEC_DIRS[@]}"}"; do
+        IFS='|' read -r path mode owner <<< "${entry}"
+        path="$(expand_vars "${path}")" || return 1
+        ensure_dir_exists "${path}" || return 1
+        [[ -n "${owner}" ]] && am_i_root && { chown -R "${owner}" "${path}" || return 1; }
+        if [[ "${mode}" =~ ^[0-7]+$ ]]; then
+            chmod "${mode}" "${path}" || return 1
+        elif [[ -n "${mode}" ]]; then
+            chmod -R "${mode}" "${path}" || return 1
+        fi
+        log_event "debug" "dir ${path} mode=${mode:--} owner=${owner:--}"
+    done
+
+    for hook_dir in "${SPEC_HOOKS[@]+"${SPEC_HOOKS[@]}"}"; do
+        ensure_dir_exists "${hook_dir}" || return 1
+    done
+
+    # The state directory must be writable by the service user (group-based, uid agnostic)
+    ensure_dir_exists "$(state_dir)" || return 1
+    if [[ -n "${SPEC_USER_NAME}" ]] && am_i_root; then
+        chown -R ":${SPEC_USER_GID}" "$(state_dir)" 2>/dev/null || true
+        chmod -R g+rwX "$(state_dir)" 2>/dev/null || true
+    fi
+
+    state_set "${LC_PKG}" "installed_at=$(state_now)" "installed_version=${BH_PKG_VERSION:-unknown}" \
+        "installed_recipe=${BH_PKG_RECIPE:-unknown}" "installed_user=${SPEC_USER_NAME:-root}"
+    state_event "${LC_PKG}" install ok "${BH_PKG_VERSION:-}"
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_persistence
+#
+# For every `persist` record: when the volume is mounted, seed it from the image content
+# on first use, then replace the in-image directory with a symlink to the volume.
+# Without a mounted volume the data simply stays in the container layer.
+#
+##############################################################################
+lifecycle_persistence() {
+
+    local entry path volume
+
+    for entry in "${SPEC_PERSIST[@]+"${SPEC_PERSIST[@]}"}"; do
+        IFS='|' read -r path volume <<< "${entry}"
+        path="$(expand_vars "${path}")" || return 1
+        volume="$(expand_vars "${volume}")" || return 1
+
+        if [[ ! -d "${volume}" || ! -w "${volume}" ]]; then
+            log_event "debug" "Volume ${volume} not available: ${path} stays ephemeral"
+            continue
+        fi
+        [[ -L "${path}" && "$(readlink "${path}")" == "${volume}" ]] && continue
+
+        if is_dir_empty "${volume}" && [[ -d "${path}" ]] && ! is_dir_empty "${path}"; then
+            log_event "info" "Seeding ${volume} from ${path}"
+            cp -a "${path}/." "${volume}/" || return 1
+        fi
+
+        rm -rf "${path}" || return 1
+        ln -s "${volume}" "${path}" || return 1
+        log_event "info" "Persistence: ${path} -> ${volume}"
+    done
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_templates
+#
+# Renders every `template` record from the bundle assets into its destination
+# (atomic replace, requested mode) and records the SHA-256 for drift detection.
+#
+##############################################################################
+lifecycle_templates() {
+
+    local entry src dest mode index=0 tmp
+
+    state_unset "${LC_PKG}" "tpl."
+
+    for entry in "${SPEC_TEMPLATES[@]+"${SPEC_TEMPLATES[@]}"}"; do
+        IFS='|' read -r src dest mode <<< "${entry}"
+        dest="$(expand_vars "${dest}")" || return 1
+        tmp="${dest}.shaker.$$"
+
+        render_template "${SPEC_BUNDLE}/assets/${src}" "${tmp}" || { rm -f "${tmp}"; return 1; }
+        chmod "${mode}" "${tmp}" || { rm -f "${tmp}"; return 1; }
+        # rendered by root, read by the service user
+        if am_i_root && [[ -n "${SPEC_USER_NAME}" ]]; then
+            chown "${SPEC_USER_UID:-${SPEC_USER_NAME}}:${SPEC_USER_GID}" "${tmp}" || { rm -f "${tmp}"; return 1; }
+        fi
+        mv -f "${tmp}" "${dest}" || { rm -f "${tmp}"; return 1; }
+
+        state_set "${LC_PKG}" "tpl.${index}.dest=${dest}" "tpl.${index}.sha256=$(sha256_of_file "${dest}")"
+        log_event "info" "Rendered ${src} -> ${dest}"
+        index=$((index + 1))
+    done
+
+}
+
+
+# Where the "first initialization done" marker lives: on the persistent volume when there
+# is one (so the marker follows the data), otherwise in the state directory.
+_lifecycle_marker() {
+
+    local entry path volume
+
+    for entry in "${SPEC_PERSIST[@]+"${SPEC_PERSIST[@]}"}"; do
+        IFS='|' read -r path volume <<< "${entry}"
+        volume="$(expand_vars "${volume}" 2>/dev/null)" || continue
+        if [[ -d "${volume}" && -w "${volume}" ]]; then
+            echo "${volume}/.bytehawks-${LC_PKG}.initialized"
+            return 0
+        fi
+    done
+
+    echo "$(state_dir)/${LC_PKG}.initialized"
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_init
+#
+# The idempotent per-start phase, in this order:
+#   1. pre_init hooks      2. persistence      3. templates
+#   4. first_init hooks (only when the marker is missing or --reinit)
+#   5. post_init hooks     6. state + audit event
+# Expects parameters already resolved and exported (lifecycle_resolve).
+#
+##############################################################################
+lifecycle_init() {
+
+    local marker hooks_dir
+
+    log_event "info" "Initializing ${LC_PKG} ${BH_PKG_VERSION:-}"
+
+    hooks_dir="${SPEC_HOOKS[pre_init]:-}"
+    [[ -n "${hooks_dir}" ]] && { run_hooks "${hooks_dir}" || { state_event "${LC_PKG}" init fail pre_init; return 1; }; }
+
+    lifecycle_persistence || { state_event "${LC_PKG}" init fail persistence; return 1; }
+    lifecycle_templates   || { state_event "${LC_PKG}" init fail templates;   return 1; }
+
+    marker="$(_lifecycle_marker)"
+    hooks_dir="${SPEC_HOOKS[first_init]:-}"
+    if [[ ! -e "${marker}" ]] || is_boolean_yes "${LC_REINIT}"; then
+        if [[ -n "${hooks_dir}" ]]; then
+            run_hooks "${hooks_dir}" || { state_event "${LC_PKG}" init fail first_init; return 1; }
+        fi
+        : > "${marker}" 2>/dev/null || log_event "warn" "Cannot write first-init marker ${marker}"
+        state_set "${LC_PKG}" "first_init_at=$(state_now)"
+    else
+        log_event "debug" "First initialization already done (${marker})"
+    fi
+
+    hooks_dir="${SPEC_HOOKS[post_init]:-}"
+    [[ -n "${hooks_dir}" ]] && { run_hooks "${hooks_dir}" || { state_event "${LC_PKG}" init fail post_init; return 1; }; }
+
+    state_set "${LC_PKG}" "initialized_at=$(state_now)" "init_version=${BH_PKG_VERSION:-unknown}" \
+        "config_hash=$(lifecycle_config_hash)"
+    state_event "${LC_PKG}" init ok "${BH_PKG_VERSION:-}"
+
+}
+
+
+# Expands the run command into the global array LC_ARGV (${VAR} from the parameters).
+_lifecycle_argv() {
+
+    local arg expanded
+    LC_ARGV=()
+
+    (( ${#SPEC_RUN[@]} > 0 )) || { log_event "error" "${LC_PKG} declares no run command"; return 1; }
+
+    for arg in "${SPEC_RUN[@]}"; do
+        expanded="$(expand_vars "${arg}")" || return 1
+        LC_ARGV+=("${expanded}")
+    done
+    LC_ARGV+=("${LC_EXTRA[@]+"${LC_EXTRA[@]}"}")
+
+}
+
+
+# Pidfile of a daemonized service.
+_lifecycle_pidfile() {
+
+    local pidfile="${SPEC_PIDFILE:-${BH_VAR}/run/${LC_PKG}.pid}"
+    expand_vars "${pidfile}"
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_run
+#
+# init (unless --no-init) and then start the service.
+#   foreground (default) : exec as PID 1, privileges dropped to the declared user
+#   --daemon             : detached, output appended to $BH_VAR/log/<pkg>.log, PID file written
+#
+##############################################################################
+lifecycle_run() {
+
+    local pidfile logfile
+
+    if ! is_boolean_yes "${LC_NO_INIT}"; then
+        lifecycle_init || return 1
+    fi
+
+    _lifecycle_argv || return 1
+
+    if is_boolean_yes "${LC_DAEMON}"; then
+        pidfile="$(_lifecycle_pidfile)" || return 1
+        logfile="${BH_VAR}/log/${LC_PKG}.log"
+        log_event "info" "Starting ${LC_PKG} in background (log: ${logfile})"
+        mkdir -p "$(dirname "${logfile}")" && : >> "${logfile}"
+        # the service user must be able to open its own stdout (e.g. nginx on /dev/stdout)
+        if am_i_root && [[ -n "${SPEC_USER_NAME}" ]]; then
+            chown "${SPEC_USER_UID:-${SPEC_USER_NAME}}:${SPEC_USER_GID}" "${logfile}" || return 1
+            # pre-create the PID file owned by the service user: applications that write their own
+            # (nginx) must be able to overwrite what the launcher records
+            mkdir -p "$(dirname "${pidfile}")" && : >> "${pidfile}" || return 1
+            chown "${SPEC_USER_UID:-${SPEC_USER_NAME}}:${SPEC_USER_GID}" "${pidfile}" || return 1
+        fi
+        state_event "${LC_PKG}" run ok daemon
+        service_start_detached "${pidfile}" "${logfile}" \
+            "${SHAKER_HOME}/bin/shaker" run "${LC_PKG}" --no-init "${LC_PASSTHROUGH[@]+"${LC_PASSTHROUGH[@]}"}" \
+            -- "${LC_EXTRA[@]+"${LC_EXTRA[@]}"}"
+        return $?
+    fi
+
+    state_event "${LC_PKG}" run ok "${LC_ARGV[0]}"
+
+    if am_i_root && [[ -n "${SPEC_USER_NAME}" ]]; then
+        cleanup_bh_shaker_env_vars
+        exec_as_user "${SPEC_USER_UID:-${SPEC_USER_NAME}}" "${SPEC_USER_GID}" "${LC_ARGV[@]}"
+    fi
+
+    ensure_passwd_entry "${SPEC_USER_NAME:-bytehawks}" "${SPEC_USER_HOME:-/tmp}"
+    cleanup_bh_shaker_env_vars
+    exec "${LC_ARGV[@]}"
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_stop
+#
+# Stops a service started with `run --daemon` using the declared stop signal.
+#
+##############################################################################
+lifecycle_stop() {
+
+    local pidfile
+    pidfile="$(_lifecycle_pidfile)" || return 1
+    service_stop "${pidfile}" "${SPEC_STOPSIGNAL}" "${BH_SHAKER_STOP_TIMEOUT:-30}"
+    state_event "${LC_PKG}" stop ok
+
+}
+
+
+# ------------------------------------------------------------------ verify
+
+_check() {  # status name [detail]
+
+    case "$1" in
+        OK)   LC_OK=$((LC_OK + 1)) ;;
+        WARN) LC_WARN=$((LC_WARN + 1)) ;;
+        FAIL) LC_FAIL=$((LC_FAIL + 1)) ;;
+    esac
+    printf '[%-4s] %-28s %s\n' "$1" "$2" "${3:-}"
+
+}
+
+
+# "drwxr-sr-x" -> 2755-style low 9 bits as octal digits (e.g. 755)
+_mode_to_octal() {
+
+    local s="${1:1:9}" i digit out=""
+
+    for i in 0 3 6; do
+        digit=0
+        [[ "${s:i:1}" == r ]] && digit=$((digit + 4))
+        [[ "${s:i+1:1}" == w ]] && digit=$((digit + 2))
+        [[ "${s:i+2:1}" == [xst] ]] && digit=$((digit + 1))
+        out+="${digit}"
+    done
+    echo "${out}"
+
+}
+
+
+# Does a mode string (ls -l) satisfy a requested mode (octal, or symbolic like g+rwX)?
+_mode_satisfies() {
+
+    local actual_oct="$2" want="$3" classes perms cls perm shift digit
+
+    if [[ "${want}" =~ ^[0-7]+$ ]]; then
+        [[ "$(printf '%03d' "$((10#${actual_oct}))")" == "$(printf '%03d' "$((10#${want: -3}))")" ]]
+        return
+    fi
+
+    if [[ "${want}" =~ ^([ugoa]*)\+([rwxX]+)$ ]]; then
+        classes="${BASH_REMATCH[1]:-a}"; perms="${BASH_REMATCH[2]}"
+        [[ "${classes}" == *a* ]] && classes="ugo"
+        for ((cls = 0; cls < ${#classes}; cls++)); do
+            case "${classes:cls:1}" in u) shift=0 ;; g) shift=1 ;; o) shift=2 ;; esac
+            digit="${actual_oct:shift:1}"
+            for ((perm = 0; perm < ${#perms}; perm++)); do
+                case "${perms:perm:1}" in
+                    r) (( digit & 4 )) || return 1 ;;
+                    w) (( digit & 2 )) || return 1 ;;
+                    x) (( digit & 1 )) || return 1 ;;
+                esac
+            done
+        done
+        return 0
+    fi
+
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_verify
+#
+# Read-only audit. Checks the bundle, required tools, service user, directory
+# ownership/mode, parameter validity, rendered-file drift (a file edited by hand, or
+# parameters changed since the last init) and health. Prints one line per check.
+#
+# Returns:
+#   0 when there is no FAIL (and no WARN with --strict), 1 otherwise.
+#
+##############################################################################
+lifecycle_verify() {
+
+    local entry path mode owner tool dest src tpl_mode index=0 want actual tmp
+    local modestr uid gid host port
+
+    LC_OK=0; LC_WARN=0; LC_FAIL=0
+    _check OK "bundle" "${SPEC_BUNDLE} (${BH_PKG_NAME:-?} ${BH_PKG_VERSION:-?})"
+
+    for tool in "${SPEC_REQUIRES[@]+"${SPEC_REQUIRES[@]}"}"; do
+        if command -v "${tool}" >/dev/null 2>&1 || [[ -x "${BH_PKG_PREFIX:-/nonexistent}/bin/${tool}" ]] \
+           || [[ -x "${BH_DEPS}/bin/${tool}" ]]; then
+            _check OK "requires ${tool}"
+        else
+            _check FAIL "requires ${tool}" "not found in PATH, ${BH_PKG_PREFIX:-?}/bin or ${BH_DEPS}/bin"
+        fi
+    done
+
+    if [[ -n "${SPEC_USER_NAME}" ]]; then
+        if uid="$(id -u "${SPEC_USER_NAME}" 2>/dev/null)"; then
+            if [[ -n "${SPEC_USER_UID}" && "${uid}" != "${SPEC_USER_UID}" ]]; then
+                _check FAIL "user ${SPEC_USER_NAME}" "uid ${uid}, expected ${SPEC_USER_UID}"
+            else
+                _check OK "user ${SPEC_USER_NAME}" "uid ${uid}"
+            fi
+        else
+            _check FAIL "user ${SPEC_USER_NAME}" "does not exist (run: shaker install ${LC_PKG})"
+        fi
+    fi
+
+    for entry in "${SPEC_DIRS[@]+"${SPEC_DIRS[@]}"}"; do
+        IFS='|' read -r path mode owner <<< "${entry}"
+        path="$(expand_vars "${path}")" || continue
+        if [[ ! -d "${path}" ]]; then
+            _check FAIL "dir ${path}" "missing"
+            continue
+        fi
+        read -r modestr _ uid gid _ < <(ls -ldn "${path}")
+        actual="$(_mode_to_octal "${modestr}")"
+        if [[ -n "${owner}" && "${uid}:${gid}" != "${owner}" ]]; then
+            _check FAIL "dir ${path}" "owner ${uid}:${gid}, expected ${owner}"
+        elif [[ -n "${mode}" ]] && ! _mode_satisfies "${modestr}" "${actual}" "${mode}"; then
+            _check FAIL "dir ${path}" "mode ${actual}, expected ${mode}"
+        else
+            _check OK "dir ${path}" "${uid}:${gid} ${actual}"
+        fi
+    done
+
+    if (( ${#ROSETTA_ORDER[@]} > 0 )); then
+        _check OK "parameters" "${#ROSETTA_ORDER[@]} declared, all valid"
+    fi
+
+    for entry in "${SPEC_TEMPLATES[@]+"${SPEC_TEMPLATES[@]}"}"; do
+        IFS='|' read -r src dest tpl_mode <<< "${entry}"
+        dest="$(expand_vars "${dest}")" || continue
+        want="$(state_get "${LC_PKG}" "tpl.${index}.sha256" || true)"
+        index=$((index + 1))
+
+        if [[ ! -f "${dest}" ]]; then
+            _check FAIL "template ${dest}" "not rendered (run: shaker init ${LC_PKG})"
+            continue
+        fi
+        if [[ -z "${want}" ]]; then
+            _check WARN "template ${dest}" "no recorded hash: init never ran"
+            continue
+        fi
+        actual="$(sha256_of_file "${dest}")"
+        if [[ "${actual}" != "${want}" ]]; then
+            _check FAIL "template ${dest}" "DRIFT: modified after init (hash ${actual:0:12} != ${want:0:12})"
+            continue
+        fi
+        tmp="$(mktemp "${TMPDIR:-/tmp}/bh-verify.XXXXXX")"
+        if render_template "${SPEC_BUNDLE}/assets/${src}" "${tmp}" 2>/dev/null \
+           && [[ "$(sha256_of_file "${tmp}")" != "${want}" ]]; then
+            _check WARN "template ${dest}" "parameters changed since last init (run: shaker init ${LC_PKG})"
+        else
+            _check OK "template ${dest}" "in sync"
+        fi
+        rm -f "${tmp}"
+    done
+
+    if [[ -n "$(state_get "${LC_PKG}" installed_at || true)" ]]; then
+        _check OK "state" "installed $(state_get "${LC_PKG}" installed_at), initialized $(state_get "${LC_PKG}" initialized_at || echo never)"
+    else
+        _check WARN "state" "no install record"
+    fi
+
+    if ! is_boolean_yes "${LC_NO_HEALTH}" && [[ -n "${SPEC_HEALTH_KIND}" ]]; then
+        case "${SPEC_HEALTH_KIND}" in
+            tcp)
+                host="$(expand_vars "${SPEC_HEALTH[0]}")"; port="$(expand_vars "${SPEC_HEALTH[1]}")"
+                if is_port_open "${host}" "${port}"; then
+                    _check OK "health tcp" "${host}:${port} open"
+                else
+                    _check FAIL "health tcp" "${host}:${port} closed"
+                fi
+                ;;
+            cmd)
+                local -a hc=(); local a
+                for a in "${SPEC_HEALTH[@]}"; do hc+=("$(expand_vars "${a}")"); done
+                if "${hc[@]}" >/dev/null 2>&1; then _check OK "health cmd" "${hc[*]}"; else _check FAIL "health cmd" "${hc[*]}"; fi
+                ;;
+        esac
+    fi
+
+    printf -- '-- %d ok, %d warning, %d failed\n' "${LC_OK}" "${LC_WARN}" "${LC_FAIL}"
+    state_set "${LC_PKG}" "last_verify_at=$(state_now)" "last_verify_result=$(( LC_FAIL > 0 ? 1 : 0 ))"
+    state_event "${LC_PKG}" verify "$(( LC_FAIL > 0 ? 0 : 1 )) ok:${LC_OK} warn:${LC_WARN} fail:${LC_FAIL}"
+
+    (( LC_FAIL == 0 )) || return 1
+    ! is_boolean_yes "${LC_STRICT}" || (( LC_WARN == 0 ))
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_status
+#
+# Prints the recorded state and the last events of a package.
+#
+##############################################################################
+lifecycle_status() {
+
+    local file
+    file="$(state_file "${LC_PKG}")"
+
+    printf 'package   %s %s (%s)\n' "${BH_PKG_NAME:-${LC_PKG}}" "${BH_PKG_VERSION:-?}" "${BH_PKG_VARIANT:-?}"
+    printf 'bundle    %s\n' "${SPEC_BUNDLE}"
+    printf 'recipe    %s\n' "${BH_PKG_RECIPE:-?}"
+    if [[ -r "${file}" ]]; then
+        grep -v '^tpl\.' "${file}" | sed 's/^/state     /'
+    else
+        echo "state     (none recorded)"
+    fi
+
+    if [[ -r "$(state_dir)/events.log" ]]; then
+        grep " ${LC_PKG} " "$(state_dir)/events.log" | tail -n 5 | sed 's/^/event     /'
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: lifecycle_unit
+#
+# Prints a hardened systemd unit for the package. systemd itself drops privileges
+# (User=/Group=), so init and run both execute as the service user.
+#
+##############################################################################
+lifecycle_unit() {
+
+    local rw_paths="" entry path identity=""
+
+    [[ -n "${SPEC_USER_NAME}" ]] && identity="User=${SPEC_USER_NAME}"$'\n'"Group=${SPEC_USER_GID}"$'\n'
+
+    for entry in "${SPEC_DIRS[@]+"${SPEC_DIRS[@]}"}"; do
+        path="$(expand_vars "${entry%%|*}")" && rw_paths+=" ${path}"
+    done
+    rw_paths+=" $(state_dir) ${BH_VAR}"
+
+    cat <<UNIT
+# Generated by shaker $(shaker_version) from the Distillery bundle of ${LC_PKG} ${BH_PKG_VERSION:-}
+[Unit]
+Description=Bytehawks ${LC_PKG} ${BH_PKG_VERSION:-}
+Documentation=https://github.com/bytehawks-org/shaker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+${identity}ExecStartPre=${SHAKER_HOME}/bin/shaker init ${LC_PKG}
+ExecStart=${SHAKER_HOME}/bin/shaker run ${LC_PKG} --no-init
+KillSignal=SIG${SPEC_STOPSIGNAL}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=${rw_paths# }
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+}

@@ -1,0 +1,605 @@
+#!/usr/bin/env bash
+#
+# rosetta.libsh - the "Rosetta stone": one declarative map translating every
+# dialect a parameter can be expressed in into a single canonical ENV variable.
+#
+#   container / pod : CLI flags, env vars, upstream env aliases, *_FILE secrets
+#   legacy server/VM: config files (env, ini, json, yaml) + drop-in directory
+#
+# The map is a plain text file, emitted by Distillery from the package
+# `runtime.env` section (see docs/ROSETTA.md), one parameter per line:
+#
+#   env|type|default|flags|aliases|file_key|cli|native_env|description
+#
+#   env         canonical variable, BH_<PACKAGE>_<NAME>
+#   type        string secret int uint port bool path enum:a,b,c  (see validate_type)
+#   default     default value ("" = none)
+#   flags       comma list: required
+#   aliases     comma list of alternative env names accepted as input
+#   file_key    key in config files (dotted for ini/json/yaml: section.key)
+#   cli         CLI flag, e.g. --port (value as --port=1 or --port 1; booleans: bare flag)
+#   native_env  extra variable exported with the same value (what the app itself reads)
+#   description free text, used by `shaker env --help-vars`
+#
+# Precedence (highest first):
+#   1. CLI flag
+#   2. canonical env var                 (ENV and ENV_FILE together = error)
+#   3. canonical ENV_FILE                (content of the file, e.g. Kubernetes secret)
+#   4. alias env var / alias_FILE
+#   5. configuration file / drop-ins
+#   6. default
+#
+# Secrets are never written to logs: provenance output redacts them.
+
+
+ROSETTA_ORDER=()
+declare -gA ROSETTA_TYPE=() ROSETTA_DEFAULT=() ROSETTA_FLAGS=() ROSETTA_ALIASES=()
+declare -gA ROSETTA_FILEKEY=() ROSETTA_CLI=() ROSETTA_NATIVE=() ROSETTA_DESC=()
+declare -gA ROSETTA_CFG=()        # flattened configuration file content
+declare -gA ROSETTA_VALUE=() ROSETTA_SOURCE=() ROSETTA_CLI_VALUE=()
+ROSETTA_REST=()
+
+
+##############################################################################
+#
+# Function: rosetta_reset
+#
+# Clears every piece of Rosetta state.
+#
+##############################################################################
+rosetta_reset() {
+
+    ROSETTA_ORDER=()
+    ROSETTA_TYPE=(); ROSETTA_DEFAULT=(); ROSETTA_FLAGS=(); ROSETTA_ALIASES=()
+    ROSETTA_FILEKEY=(); ROSETTA_CLI=(); ROSETTA_NATIVE=(); ROSETTA_DESC=()
+    ROSETTA_CFG=(); ROSETTA_VALUE=(); ROSETTA_SOURCE=(); ROSETTA_CLI_VALUE=(); ROSETTA_REST=()
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_load_map
+#
+# Loads a Rosetta map file.
+#
+# Usage:
+#   rosetta_load_map <file>
+#
+# Returns:
+#   0 on success, 1 if the file is unreadable or a line is malformed.
+#
+##############################################################################
+rosetta_load_map() {
+
+    local file="${1:?map file required}"
+    local env type def flags aliases fkey cli native desc lineno=0
+
+    [[ -r "${file}" ]] || { log_event "error" "Rosetta map not readable: ${file}"; return 1; }
+
+    while IFS='|' read -r env type def flags aliases fkey cli native desc || [[ -n "${env}" ]]; do
+        lineno=$((lineno + 1))
+        [[ -z "${env}" || "${env}" == \#* ]] && continue
+
+        if [[ ! "${env}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            log_event "error" "${file}:${lineno}: invalid variable name '${env}'"
+            return 1
+        fi
+        local vrc=0
+        validate_type "${type:-string}" "" >/dev/null 2>&1 || vrc=$?
+        if (( vrc == 2 )); then
+            log_event "error" "${file}:${lineno}: unknown type '${type}'"
+            return 1
+        fi
+
+        ROSETTA_ORDER+=("${env}")
+        ROSETTA_TYPE["${env}"]="${type:-string}"
+        ROSETTA_DEFAULT["${env}"]="${def}"
+        ROSETTA_FLAGS["${env}"]="${flags}"
+        ROSETTA_ALIASES["${env}"]="${aliases}"
+        ROSETTA_FILEKEY["${env}"]="${fkey}"
+        ROSETTA_CLI["${env}"]="${cli}"
+        ROSETTA_NATIVE["${env}"]="${native}"
+        ROSETTA_DESC["${env}"]="${desc}"
+    done < "${file}"
+
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_load_config
+#
+# Loads a configuration file (and, for a base file X.conf, the drop-ins in
+# X.conf.d/*.conf in lexical order, later wins) into ROSETTA_CFG.
+# Format is chosen by extension: .env/.conf/.cfg -> env, .ini -> ini,
+# .json -> json, .yaml/.yml -> yaml. BH_SHAKER_CONFIG_FORMAT overrides it.
+# Files are parsed, never sourced.
+#
+# Usage:
+#   rosetta_load_config <file>
+#
+##############################################################################
+rosetta_load_config() {
+
+    local file="${1:?config file required}" dropin format
+
+    rosetta_load_config_file "${file}" || return 1
+
+    if [[ -d "${file}.d" ]]; then
+        for dropin in "${file}.d"/*.conf; do
+            [[ -f "${dropin}" ]] || continue
+            log_event "debug" "Loading drop-in ${dropin}"
+            rosetta_load_config_file "${dropin}" "env" || return 1
+        done
+    fi
+
+    return 0
+
+}
+
+rosetta_load_config_file() {
+
+    local file="$1" format="${2:-${BH_SHAKER_CONFIG_FORMAT:-}}"
+
+    [[ -r "${file}" ]] || { log_event "error" "Config file not readable: ${file}"; return 1; }
+
+    if [[ -z "${format}" ]]; then
+        case "${file##*.}" in
+            ini)        format="ini" ;;
+            json)       format="json" ;;
+            yaml|yml)   format="yaml" ;;
+            *)          format="env" ;;
+        esac
+    fi
+
+    log_event "debug" "Loading ${format} configuration ${file}"
+
+    case "${format}" in
+        env)  rosetta_parse_env  < "${file}" ;;
+        ini)  rosetta_parse_ini  < "${file}" ;;
+        json) rosetta_parse_json < "${file}" ;;
+        yaml) rosetta_parse_yaml < "${file}" ;;
+        *)    log_event "error" "Unsupported config format '${format}'"; return 1 ;;
+    esac
+
+}
+
+
+# Strips matching surrounding quotes from a value (no escape processing).
+_rosetta_unquote() {
+
+    local v="$1"
+
+    if [[ "${v}" == \"*\" && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"
+    elif [[ "${v}" == \'*\' && ${#v} -ge 2 ]]; then
+        v="${v:1:${#v}-2}"
+    fi
+    printf '%s' "${v}"
+
+}
+
+# Trims leading and trailing whitespace.
+_rosetta_trim() {
+
+    local v="$1"
+
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s' "${v}"
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_parse_env
+#
+# Reads KEY=VALUE lines from stdin into ROSETTA_CFG. Supports comments, an
+# optional leading "export " and single/double quoted values. No expansion is
+# ever performed.
+#
+##############################################################################
+rosetta_parse_env() {
+
+    local line key value
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="$(_rosetta_trim "${line}")"
+        [[ -z "${line}" || "${line}" == \#* ]] && continue
+        line="${line#export }"
+        [[ "${line}" == *=* ]] || continue
+        key="$(_rosetta_trim "${line%%=*}")"
+        value="$(_rosetta_unquote "$(_rosetta_trim "${line#*=}")")"
+        ROSETTA_CFG["${key}"]="${value}"
+    done
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_parse_ini
+#
+# Reads an INI file from stdin. Keys are flattened as section.key; keys before
+# any section keep their plain name. Only full-line comments (# or ;).
+#
+##############################################################################
+rosetta_parse_ini() {
+
+    local line section="" key value
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="$(_rosetta_trim "${line}")"
+        [[ -z "${line}" || "${line}" == \#* || "${line}" == \;* ]] && continue
+
+        if [[ "${line}" =~ ^\[(.+)\]$ ]]; then
+            section="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        [[ "${line}" == *=* ]] || continue
+        key="$(_rosetta_trim "${line%%=*}")"
+        value="$(_rosetta_unquote "$(_rosetta_trim "${line#*=}")")"
+        ROSETTA_CFG["${section:+${section}.}${key}"]="${value}"
+    done
+
+}
+
+
+# Flattens a JSON document on stdin to "dotted.key=value" lines (scalars only).
+_rosetta_flatten_json() {
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r 'paths(scalars) as $p | "\($p | map(tostring) | join("."))=\(getpath($p))"'
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -I -c '
+import sys, json
+def walk(o, p):
+    if isinstance(o, dict):
+        for k, v in o.items(): walk(v, p + [str(k)])
+    elif isinstance(o, list):
+        for i, v in enumerate(o): walk(v, p + [str(i)])
+    elif o is not None:
+        v = "true" if o is True else "false" if o is False else o
+        print(".".join(p) + "=" + str(v))
+walk(json.load(sys.stdin), [])'
+    else
+        log_event "error" "JSON configuration needs jq or python3"
+        return 1
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_parse_json / rosetta_parse_yaml
+#
+# Read a JSON / YAML document from stdin and flatten it (a.b.c=value, list
+# items as a.0, a.1). Need jq or python3 (YAML: PyYAML or mikefarah yq).
+# On minimal images Distillery can pre-flatten these formats into env files,
+# so the runtime does not depend on any extra tool.
+#
+##############################################################################
+rosetta_parse_json() {
+
+    local flat
+    flat="$(_rosetta_flatten_json)" || return 1
+    rosetta_parse_env <<< "${flat}"
+
+}
+
+rosetta_parse_yaml() {
+
+    local doc json flat
+    doc="$(cat)"
+
+    if command -v python3 >/dev/null 2>&1 && python3 -I -c 'import yaml' 2>/dev/null; then
+        json="$(python3 -I -c 'import sys,json,yaml;json.dump(yaml.safe_load(sys.stdin),sys.stdout)' <<< "${doc}")"
+    elif command -v yq >/dev/null 2>&1 && json="$(yq -o=json '.' <<< "${doc}" 2>/dev/null)"; then
+        :
+    elif command -v yq >/dev/null 2>&1 && json="$(yq '.' <<< "${doc}" 2>/dev/null)"; then
+        :
+    else
+        log_event "error" "YAML configuration needs python3+PyYAML or yq (or ask Distillery to pre-flatten it)"
+        return 1
+    fi
+
+    flat="$(_rosetta_flatten_json <<< "${json}")" || return 1
+    rosetta_parse_env <<< "${flat}"
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_find_config
+#
+# Prints the configuration file of a package for legacy hosts:
+#   1. $BH_SHAKER_CONFIG
+#   2. $BH_ETC/<pkg>/<pkg>.{conf,env,ini,yaml,yml,json}
+#   3. /etc/bytehawks/<pkg>/<pkg>.{conf,...}
+# Prints nothing (rc 1) when none exists.
+#
+# Usage:
+#   rosetta_find_config <package>
+#
+##############################################################################
+rosetta_find_config() {
+
+    local pkg="${1:?package required}" base ext
+
+    if [[ -n "${BH_SHAKER_CONFIG:-}" ]]; then
+        echo "${BH_SHAKER_CONFIG}"
+        return 0
+    fi
+
+    for base in "${BH_ETC}/${pkg}" "/etc/bytehawks/${pkg}"; do
+        for ext in conf env ini yaml yml json; do
+            if [[ -f "${base}/${pkg}.${ext}" ]]; then
+                echo "${base}/${pkg}.${ext}"
+                return 0
+            fi
+        done
+    done
+
+    return 1
+
+}
+
+
+# Reads a *_FILE value: prints the file content, error if unreadable.
+_rosetta_read_secret_file() {
+
+    local var="$1" file="$2" content
+
+    if [[ ! -r "${file}" ]]; then
+        log_event "error" "${var}: file '${file}' is not readable"
+        return 1
+    fi
+    content="$(cat "${file}"; printf x)"
+    content="${content%x}"
+    printf '%s' "${content%$'\n'}"
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_parse_cli
+#
+# Matches CLI arguments against the `cli` column of the map and stores the
+# result in ROSETTA_CLI_VALUE. Stops at "--"; the remaining arguments are
+# left in ROSETTA_REST (used by `shaker exec`).
+#
+# Returns:
+#   0 on success, 1 on an unknown flag or a missing value.
+#
+##############################################################################
+rosetta_parse_cli() {
+
+    local arg flag value env found
+
+    ROSETTA_CLI_VALUE=()
+    ROSETTA_REST=()
+
+    while (( $# > 0 )); do
+        arg="$1"; shift
+
+        if [[ "${arg}" == "--" ]]; then
+            ROSETTA_REST=("$@")
+            return 0
+        fi
+
+        flag="${arg%%=*}"
+        found=""
+        for env in "${ROSETTA_ORDER[@]}"; do
+            [[ "${ROSETTA_CLI[${env}]}" == "${flag}" ]] && { found="${env}"; break; }
+        done
+
+        if [[ -z "${found}" ]]; then
+            log_event "error" "Unknown option '${flag}'"
+            return 1
+        fi
+
+        if [[ "${arg}" == *=* ]]; then
+            value="${arg#*=}"
+        elif [[ "${ROSETTA_TYPE[${found}]}" == "bool" ]]; then
+            value="true"
+        elif (( $# > 0 )); then
+            value="$1"; shift
+        else
+            log_event "error" "Option '${flag}' requires a value"
+            return 1
+        fi
+
+        ROSETTA_CLI_VALUE["${found}"]="${value}"
+    done
+
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_resolve
+#
+# Resolves every variable of the loaded map following the precedence rules,
+# validates required/type/enum constraints and fills ROSETTA_VALUE and
+# ROSETTA_SOURCE. Nothing is exported yet.
+#
+# Returns:
+#   0 if everything is valid, 1 otherwise (all problems are reported).
+#
+##############################################################################
+rosetta_resolve() {
+
+    local env alias value source fkey flags errors=0 file_var type
+    local -a aliases
+
+    ROSETTA_VALUE=(); ROSETTA_SOURCE=()
+
+    for env in "${ROSETTA_ORDER[@]}"; do
+        value=""; source=""
+        file_var="${env}_FILE"
+
+        if [[ -n "${ROSETTA_CLI_VALUE[${env}]+x}" ]]; then
+            value="${ROSETTA_CLI_VALUE[${env}]}"; source="cli"
+        elif [[ -n "${!env:-}" && -n "${!file_var:-}" ]]; then
+            log_event "error" "${env} and ${file_var} are both set: choose one"
+            errors=$((errors + 1)); continue
+        elif [[ -n "${!env:-}" ]]; then
+            value="${!env}"; source="env"
+        elif [[ -n "${!file_var:-}" ]]; then
+            value="$(_rosetta_read_secret_file "${file_var}" "${!file_var}")" || { errors=$((errors + 1)); continue; }
+            source="env-file"
+        else
+            IFS=',' read -ra aliases <<< "${ROSETTA_ALIASES[${env}]}"
+            for alias in "${aliases[@]}"; do
+                [[ -z "${alias}" ]] && continue
+                file_var="${alias}_FILE"
+                if [[ -n "${!alias:-}" ]]; then
+                    value="${!alias}"; source="alias:${alias}"; break
+                elif [[ -n "${!file_var:-}" ]]; then
+                    value="$(_rosetta_read_secret_file "${file_var}" "${!file_var}")" || { errors=$((errors + 1)); continue 2; }
+                    source="alias-file:${alias}"; break
+                fi
+            done
+        fi
+
+        if [[ -z "${source}" ]]; then
+            fkey="${ROSETTA_FILEKEY[${env}]}"
+            if [[ -n "${fkey}" && -n "${ROSETTA_CFG[${fkey}]+x}" ]]; then
+                value="${ROSETTA_CFG[${fkey}]}"; source="config:${fkey}"
+            elif [[ -n "${ROSETTA_CFG[${env}]+x}" ]]; then
+                value="${ROSETTA_CFG[${env}]}"; source="config:${env}"
+            elif [[ -n "${ROSETTA_DEFAULT[${env}]}" ]]; then
+                value="${ROSETTA_DEFAULT[${env}]}"; source="default"
+            fi
+        fi
+
+        flags=",${ROSETTA_FLAGS[${env}]},"
+        if [[ -z "${source}" ]]; then
+            if [[ "${flags}" == *,required,* ]]; then
+                log_event "error" "${env} is required (${ROSETTA_DESC[${env}]:-no description})"
+                errors=$((errors + 1))
+            fi
+            continue
+        fi
+
+        type="${ROSETTA_TYPE[${env}]}"
+        if ! validate_type "${type}" "${value}"; then
+            if [[ "${type}" == "secret" ]]; then
+                log_event "error" "${env}: invalid value for type '${type}' (from ${source})"
+            else
+                log_event "error" "${env}: invalid value '${value}' for type '${type}' (from ${source})"
+            fi
+            errors=$((errors + 1)); continue
+        fi
+        [[ "${type}" == "bool" ]] && value="$(normalize_boolean "${value}")"
+
+        ROSETTA_VALUE["${env}"]="${value}"
+        ROSETTA_SOURCE["${env}"]="${source}"
+    done
+
+    (( errors == 0 ))
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_export
+#
+# Exports the resolved variables (and their native_env twins) into the
+# current environment.
+#
+##############################################################################
+rosetta_export() {
+
+    local env native
+
+    for env in "${ROSETTA_ORDER[@]}"; do
+        [[ -n "${ROSETTA_SOURCE[${env}]:-}" ]] || continue
+        export "${env}=${ROSETTA_VALUE[${env}]}"
+        native="${ROSETTA_NATIVE[${env}]}"
+        [[ -n "${native}" ]] && export "${native}=${ROSETTA_VALUE[${env}]}"
+    done
+
+    return 0
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_print
+#
+# Prints the resolved variables on stdout.
+#
+# Usage:
+#   rosetta_print <export|dotenv|explain>
+#
+#   export   export NAME=<shell-quoted>   (eval-able: eval "$(shaker env pkg)")
+#   dotenv   NAME="value"                 (docker --env-file / systemd EnvironmentFile)
+#   explain  NAME|source|value            (secrets redacted)
+#
+##############################################################################
+rosetta_print() {
+
+    local mode="${1:-export}" env native value
+
+    for env in "${ROSETTA_ORDER[@]}"; do
+        [[ -n "${ROSETTA_SOURCE[${env}]:-}" ]] || continue
+        value="${ROSETTA_VALUE[${env}]}"
+        native="${ROSETTA_NATIVE[${env}]}"
+
+        case "${mode}" in
+            export)
+                printf 'export %s=%q\n' "${env}" "${value}"
+                [[ -n "${native}" ]] && printf 'export %s=%q\n' "${native}" "${value}"
+                ;;
+            dotenv)
+                printf '%s="%s"\n' "${env}" "${value//\"/\\\"}"
+                [[ -n "${native}" ]] && printf '%s="%s"\n' "${native}" "${value//\"/\\\"}"
+                ;;
+            explain)
+                if [[ "${ROSETTA_TYPE[${env}]}" == "secret" ]] || is_secret_name "${env}"; then
+                    value="********"
+                fi
+                printf '%-32s %-28s %s\n' "${env}" "${ROSETTA_SOURCE[${env}]}" "${value}"
+                ;;
+            *)
+                log_event "error" "Unknown output format '${mode}'"
+                return 1
+                ;;
+        esac
+    done
+
+}
+
+
+##############################################################################
+#
+# Function: rosetta_describe
+#
+# Prints a human readable reference of every variable in the map.
+#
+##############################################################################
+rosetta_describe() {
+
+    local env
+
+    printf '%-32s %-12s %-14s %s\n' "VARIABLE" "TYPE" "DEFAULT" "DESCRIPTION"
+    for env in "${ROSETTA_ORDER[@]}"; do
+        printf '%-32s %-12s %-14s %s%s\n' "${env}" "${ROSETTA_TYPE[${env}]}" \
+            "${ROSETTA_DEFAULT[${env}]:--}" "${ROSETTA_DESC[${env}]}" \
+            "$([[ ",${ROSETTA_FLAGS[${env}]}," == *,required,* ]] && echo ' [required]')"
+    done
+
+}

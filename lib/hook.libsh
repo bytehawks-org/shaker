@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# hook.libsh - init hooks. Equivalent of Bitnami's /docker-entrypoint-initdb.d
+# convention, usable identically on containers and on legacy hosts.
+
+
+##############################################################################
+#
+# Function: run_hooks
+#
+# Runs every hook found in a directory, in lexical order:
+#   - executable files are executed directly
+#   - non-executable *.sh files are executed with bash
+#   - anything else is ignored
+#
+# A failing hook aborts the run unless BH_SHAKER_HOOKS_CONTINUE is true.
+#
+# Usage:
+#   run_hooks <directory>
+#
+# Returns:
+#   0 if all hooks succeeded (or the directory does not exist), 1 otherwise.
+#
+##############################################################################
+run_hooks() {
+
+    local dir="${1:?hook directory required}" hook rc=0
+
+    [[ -d "${dir}" ]] || { log_event "debug" "No hook directory ${dir}"; return 0; }
+
+    for hook in "${dir}"/*; do
+        [[ -f "${hook}" ]] || continue
+
+        if [[ -x "${hook}" ]]; then
+            log_event "info" "Running hook ${hook}"
+            "${hook}" || rc=$?
+        elif [[ "${hook}" == *.sh ]]; then
+            log_event "info" "Running hook ${hook}"
+            bash "${hook}" || rc=$?
+        else
+            log_event "debug" "Ignoring non-executable hook ${hook}"
+            continue
+        fi
+
+        if (( rc != 0 )); then
+            log_event "error" "Hook ${hook} failed (exit ${rc})"
+            is_boolean_yes "${BH_SHAKER_HOOKS_CONTINUE:-false}" || return 1
+            rc=0
+        fi
+    done
+
+    return 0
+
+}

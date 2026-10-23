@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# validate.libsh - normalization and validation primitives.
+# Equivalent of Bitnami's libvalidations.sh, extended with typed validation
+# used by the Rosetta resolver.
+
+
+##############################################################################
+#
+# Function: normalize_boolean
+#
+# Normalizes various boolean-like input values to "true" or "false" strings.
+#
+# Arguments:
+#   $1 - The input value to normalize (case-insensitive):
+#          - "yes", "y", "1", "true", "on" as TRUE values.
+#          - "no", "n", "none", "0", "false", "off", "" as FALSE values.
+#
+# Outputs:
+#   Echoes "true" or "false". Unrecognized values echo "false".
+#
+# Returns:
+#   0 if the input is recognized as a boolean value, 1 otherwise.
+#
+##############################################################################
+normalize_boolean() {
+
+    local input="${1:-}"
+    local lower_input="${input,,}"
+
+    case "${lower_input}" in
+        true|yes|y|1|on)
+            echo "true"
+            return 0
+            ;;
+        false|no|n|none|0|off|"")
+            echo "false"
+            return 0
+            ;;
+        *)
+            echo "false"
+            return 1
+            ;;
+    esac
+
+}
+
+
+##############################################################################
+#
+# Function: is_boolean_yes
+#
+# Returns 0 when the value is a recognized TRUE value, 1 otherwise. Meant for
+# direct use in conditionals: if is_boolean_yes "${FOO:-}"; then ...
+#
+##############################################################################
+is_boolean_yes() {
+
+    [[ "$(normalize_boolean "${1:-}" 2>/dev/null)" == "true" ]]
+
+}
+
+
+##############################################################################
+#
+# Function: normalize_case
+#
+# Converts the input string to lowercase or uppercase.
+#
+# Usage:
+#   normalize_case <lower|upper> <string>
+#
+##############################################################################
+normalize_case() {
+
+    if [[ "$#" -ne 2 ]]; then
+        echo "normalize_case requires exactly 2 arguments: <case> <string>" >&2
+        return 1
+    fi
+
+    local output_case="${1,,}"
+    local input="$2"
+
+    case "${output_case}" in
+        lower) echo "${input,,}" ;;
+        upper) echo "${input^^}" ;;
+        *)
+            echo "normalize_case: invalid case '$1'. Use 'lower' or 'upper'." >&2
+            return 1
+            ;;
+    esac
+
+}
+
+
+##############################################################################
+#
+# Function: is_int / is_uint / is_port
+#
+# Integer, non-negative integer and TCP/UDP port (1-65535) checks.
+# Return 0 when the value matches, 1 otherwise.
+#
+##############################################################################
+is_int() {
+    [[ "${1:-}" =~ ^-?[0-9]+$ ]]
+}
+
+is_uint() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_port() {
+    is_uint "${1:-}" && (( 10#${1} >= 1 && 10#${1} <= 65535 ))
+}
+
+
+##############################################################################
+#
+# Function: is_secret_name
+#
+# Returns 0 if a variable name looks like it holds a secret, so that its value
+# can be redacted in logs and diagnostics.
+#
+##############################################################################
+is_secret_name() {
+
+    local upper="${1^^}"
+
+    [[ "${upper}" == *PASSWORD* || "${upper}" == *PASSWD* || "${upper}" == *SECRET* \
+    || "${upper}" == TOKEN || "${upper}" == *_TOKEN || "${upper}" == *_TOKEN_* \
+    || "${upper}" == *_KEY || "${upper}" == *_KEY_* || "${upper}" == *CREDENTIAL* ]]
+
+}
+
+
+##############################################################################
+#
+# Function: validate_type
+#
+# Validates a value against a Rosetta type.
+#
+# Usage:
+#   validate_type <type> <value>
+#
+# Types:
+#   string | secret   any value
+#   int | uint        integers
+#   port              1-65535
+#   bool              any boolean-like value (see normalize_boolean)
+#   path              non-empty string without NUL, must not contain newlines
+#   enum:a,b,c        one of the listed values
+#
+# Returns:
+#   0 if valid, 1 if invalid, 2 if the type is unknown.
+#
+##############################################################################
+validate_type() {
+
+    local type="${1:-string}" value="${2-}" item
+
+    case "${type}" in
+        string|secret) return 0 ;;
+        int)  is_int  "${value}" ;;
+        uint) is_uint "${value}" ;;
+        port) is_port "${value}" ;;
+        bool) normalize_boolean "${value}" >/dev/null 2>&1 ;;
+        path) [[ -n "${value}" && "${value}" != *$'\n'* ]] ;;
+        enum:*)
+            local IFS=','
+            for item in ${type#enum:}; do
+                [[ "${value}" == "${item}" ]] && return 0
+            done
+            return 1
+            ;;
+        *) return 2 ;;
+    esac
+
+}

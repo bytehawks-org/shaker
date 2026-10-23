@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# service.libsh - process lifecycle helpers for hosts without a supervisor.
+# Equivalent of Bitnami's libservice.sh (PID files, start/stop). On systemd hosts prefer
+# `shaker unit`, in containers the service is PID 1 and none of this is needed.
+
+
+##############################################################################
+#
+# Function: service_pid
+#
+# Prints the PID stored in a PID file (rc 1 when missing or not numeric).
+#
+##############################################################################
+service_pid() {
+
+    local pid
+    [[ -r "${1:?pid file required}" ]] || return 1
+    pid="$(tr -d '[:space:]' < "$1")"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+    echo "${pid}"
+
+}
+
+
+##############################################################################
+#
+# Function: is_service_running
+#
+# Returns 0 when the PID file points to a live process.
+#
+##############################################################################
+is_service_running() {
+
+    local pid
+    pid="$(service_pid "$1")" || return 1
+    kill -0 "${pid}" 2>/dev/null
+
+}
+
+
+##############################################################################
+#
+# Function: service_start_detached
+#
+# Starts a command in the background, detached from the terminal, with its output
+# appended to a log file, and records its PID.
+#
+# Usage:
+#   service_start_detached <pid-file> <log-file> <command> [args...]
+#
+##############################################################################
+service_start_detached() {
+
+    local pidfile="$1" logfile="$2"; shift 2
+
+    if is_service_running "${pidfile}"; then
+        log_event "warn" "Already running (pid $(service_pid "${pidfile}"))"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "${pidfile}")" "$(dirname "${logfile}")" || return 1
+    nohup "$@" >> "${logfile}" 2>&1 < /dev/null &
+    echo "$!" > "${pidfile}"
+    disown 2>/dev/null || true
+
+    sleep 1
+    if ! kill -0 "$(cat "${pidfile}")" 2>/dev/null; then
+        log_event "error" "Process exited immediately, see ${logfile}"
+        rm -f "${pidfile}"
+        return 1
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: service_stop
+#
+# Sends a signal and waits for the process to exit, then SIGKILL after the timeout.
+#
+# Usage:
+#   service_stop <pid-file> [signal=TERM] [timeout-seconds=30]
+#
+##############################################################################
+service_stop() {
+
+    local pidfile="$1" signal="${2:-TERM}" timeout_s="${3:-30}" pid waited=0
+
+    pid="$(service_pid "${pidfile}")" || { log_event "info" "Not running (no pid file)"; return 0; }
+
+    if ! kill -0 "${pid}" 2>/dev/null; then
+        log_event "info" "Stale pid file removed"
+        rm -f "${pidfile}"
+        return 0
+    fi
+
+    kill -s "${signal}" "${pid}" || return 1
+
+    while kill -0 "${pid}" 2>/dev/null; do
+        if (( waited >= timeout_s )); then
+            log_event "warn" "Still running after ${timeout_s}s: SIGKILL"
+            kill -s KILL "${pid}" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    rm -f "${pidfile}"
+
+}

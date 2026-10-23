@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# spec.libsh - reader of the Distillery bundle (runtime.spec, manifest.env).
+#
+# runtime.spec is line oriented, fields separated by '|', see Distillery docs/BUNDLE.md:
+#   user|name|uid|gid|home            dir|path|mode|owner            persist|path|volume
+#   template|src|dest|mode            hook|stage|directory           run|argv0|argv1|...
+#   stopsignal|SIG                    pidfile|path                   requires|tool
+#   health|tcp|host|port              health|cmd|argv0|argv1|...
+
+
+SPEC_BUNDLE=""
+SPEC_USER_NAME=""; SPEC_USER_UID=""; SPEC_USER_GID=""; SPEC_USER_HOME=""
+SPEC_DIRS=(); SPEC_PERSIST=(); SPEC_TEMPLATES=(); SPEC_REQUIRES=()
+SPEC_RUN=(); SPEC_STOPSIGNAL="TERM"; SPEC_PIDFILE=""
+SPEC_HEALTH_KIND=""; SPEC_HEALTH=()
+declare -gA SPEC_HOOKS=()
+
+
+##############################################################################
+#
+# Function: shaker_find_bundle
+#
+# Prints the bundle directory of a package:
+#   1. --bundle override (BH_SHAKER_BUNDLE)
+#   2. $BH_ROOT/<pkg>/.bytehawks        (applications)
+#   3. $BH_DEPS/.bytehawks/<pkg>        (libraries)
+#
+# Usage:
+#   shaker_find_bundle <package>
+#
+##############################################################################
+shaker_find_bundle() {
+
+    local pkg="${1:?package required}" dir
+
+    for dir in "${BH_SHAKER_BUNDLE:-}" "${BH_ROOT}/${pkg}/.bytehawks" "${BH_DEPS}/.bytehawks/${pkg}"; do
+        if [[ -n "${dir}" && -f "${dir}/manifest.json" ]]; then
+            echo "${dir}"
+            return 0
+        fi
+    done
+
+    log_event "error" "No Distillery bundle for '${pkg}' (looked in ${BH_ROOT}/${pkg}/.bytehawks and ${BH_DEPS}/.bytehawks/${pkg})"
+    return 1
+
+}
+
+
+##############################################################################
+#
+# Function: spec_reset
+#
+# Clears every SPEC_* variable.
+#
+##############################################################################
+spec_reset() {
+
+    SPEC_BUNDLE=""
+    SPEC_USER_NAME=""; SPEC_USER_UID=""; SPEC_USER_GID=""; SPEC_USER_HOME=""
+    SPEC_DIRS=(); SPEC_PERSIST=(); SPEC_TEMPLATES=(); SPEC_REQUIRES=()
+    SPEC_RUN=(); SPEC_STOPSIGNAL="TERM"; SPEC_PIDFILE=""
+    SPEC_HEALTH_KIND=""; SPEC_HEALTH=()
+    SPEC_HOOKS=()
+
+}
+
+
+##############################################################################
+#
+# Function: spec_load
+#
+# Loads runtime.spec and exports the BH_PKG_* variables of manifest.env
+# (BH_PKG_NAME, BH_PKG_VERSION, BH_PKG_VARIANT, BH_PKG_PREFIX, BH_PKG_RECIPE)
+# plus BH_PKG_BUNDLE.
+#
+# Usage:
+#   spec_load <bundle-dir>
+#
+##############################################################################
+spec_load() {
+
+    local bundle="${1:?bundle directory required}" line key value
+    local -a fields
+
+    spec_reset
+    SPEC_BUNDLE="${bundle}"
+
+    if [[ -r "${bundle}/manifest.env" ]]; then
+        while IFS='=' read -r key value; do
+            [[ "${key}" == BH_PKG_* ]] && export "${key}=${value}"
+        done < "${bundle}/manifest.env"
+    fi
+    export BH_PKG_BUNDLE="${bundle}"
+
+    [[ -r "${bundle}/runtime.spec" ]] || return 0
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ -z "${line}" || "${line}" == \#* ]] && continue
+        IFS='|' read -ra fields <<< "${line}"
+
+        case "${fields[0]}" in
+            user)       SPEC_USER_NAME="${fields[1]:-}"; SPEC_USER_UID="${fields[2]:-}"
+                        SPEC_USER_GID="${fields[3]:-0}"; SPEC_USER_HOME="${fields[4]:-}" ;;
+            dir)        SPEC_DIRS+=("${fields[1]}|${fields[2]:-}|${fields[3]:-}") ;;
+            persist)    SPEC_PERSIST+=("${fields[1]}|${fields[2]}") ;;
+            template)   SPEC_TEMPLATES+=("${fields[1]}|${fields[2]}|${fields[3]:-0644}") ;;
+            hook)       SPEC_HOOKS["${fields[1]}"]="${fields[2]}" ;;
+            run)        SPEC_RUN=("${fields[@]:1}") ;;
+            stopsignal) SPEC_STOPSIGNAL="${fields[1]:-TERM}" ;;
+            pidfile)    SPEC_PIDFILE="${fields[1]:-}" ;;
+            requires)   SPEC_REQUIRES+=("${fields[1]}") ;;
+            health)     SPEC_HEALTH_KIND="${fields[1]}"; SPEC_HEALTH=("${fields[@]:2}") ;;
+            *)          log_event "warn" "runtime.spec: unknown record '${fields[0]}' ignored" ;;
+        esac
+    done < "${bundle}/runtime.spec"
+
+}

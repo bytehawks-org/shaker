@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+#
+# pkg.libsh - distro-agnostic package management front-end (apt, dnf, yum,
+# microdnf, tdnf, zypper, apk, pacman). Shaker does not need any Bytehawks
+# package to use it: it only drives what the host already provides.
+#
+# Environment variables:
+#   BH_SHAKER_DRY_RUN  - "true" prints the commands instead of running them.
+#
+# Logical package names:
+#   share/pkgmap.map holds lines "logical|family|real-name" so that callers can
+#   ask for "openssl-dev" and get libssl-dev / openssl-devel / openssl-dev.
+#   Names without a mapping are passed through unchanged.
+
+
+##############################################################################
+#
+# Function: pkg_resolve
+#
+# Translates a logical package name to the real name for the current OS family.
+#
+# Usage:
+#   pkg_resolve <logical-name>
+#
+# Outputs:
+#   The mapped name, or the input unchanged when no mapping exists.
+#   A mapping to "-" means "not needed on this family" and prints nothing.
+#
+##############################################################################
+pkg_resolve() {
+
+    local logical="$1" map_file="${SHAKER_SHARE}/pkgmap.map"
+    local l_name l_family l_real family="${BH_SHAKER_OS_FAMILY:-unknown}"
+
+    if [[ -r "${map_file}" ]]; then
+        while IFS='|' read -r l_name l_family l_real; do
+            [[ -z "${l_name}" || "${l_name}" == \#* ]] && continue
+            if [[ "${l_name}" == "${logical}" && "${l_family}" == "${family}" ]]; then
+                [[ "${l_real}" == "-" ]] || echo "${l_real}"
+                return 0
+            fi
+        done < "${map_file}"
+    fi
+
+    echo "${logical}"
+
+}
+
+
+##############################################################################
+#
+# Function: pkg_build_command
+#
+# Builds the argv of a package manager operation for the detected manager.
+# The result is stored in the global array SHAKER_PKG_CMD.
+#
+# Usage:
+#   pkg_build_command <update|install|remove|clean|check> [real package names...]
+#
+# Returns:
+#   0 on success, 1 for an unsupported package manager or operation.
+#
+##############################################################################
+pkg_build_command() {
+
+    local op="$1"; shift
+    local mgr="${BH_SHAKER_OS_PKG_MANAGER:-unknown}"
+
+    SHAKER_PKG_CMD=()
+
+    case "${mgr}:${op}" in
+        apt-get:update)   SHAKER_PKG_CMD=(apt-get update) ;;
+        apt-get:install)  SHAKER_PKG_CMD=(apt-get install -y --no-install-recommends "$@") ;;
+        apt-get:remove)   SHAKER_PKG_CMD=(apt-get remove -y "$@") ;;
+        apt-get:clean)    SHAKER_PKG_CMD=(sh -c 'apt-get clean && rm -rf /var/lib/apt/lists/*') ;;
+        apt-get:check)    SHAKER_PKG_CMD=(dpkg -s "$@") ;;
+
+        dnf:update)       SHAKER_PKG_CMD=(dnf makecache) ;;
+        dnf:install)      SHAKER_PKG_CMD=(dnf install -y --setopt=install_weak_deps=False "$@") ;;
+        dnf:remove)       SHAKER_PKG_CMD=(dnf remove -y "$@") ;;
+        dnf:clean)        SHAKER_PKG_CMD=(dnf clean all) ;;
+
+        microdnf:update)  SHAKER_PKG_CMD=(microdnf makecache) ;;
+        microdnf:install) SHAKER_PKG_CMD=(microdnf install -y --setopt=install_weak_deps=0 "$@") ;;
+        microdnf:remove)  SHAKER_PKG_CMD=(microdnf remove -y "$@") ;;
+        microdnf:clean)   SHAKER_PKG_CMD=(microdnf clean all) ;;
+
+        yum:update)       SHAKER_PKG_CMD=(yum makecache) ;;
+        yum:install)      SHAKER_PKG_CMD=(yum install -y "$@") ;;
+        yum:remove)       SHAKER_PKG_CMD=(yum remove -y "$@") ;;
+        yum:clean)        SHAKER_PKG_CMD=(yum clean all) ;;
+
+        tdnf:update)      SHAKER_PKG_CMD=(tdnf makecache) ;;
+        tdnf:install)     SHAKER_PKG_CMD=(tdnf install -y "$@") ;;
+        tdnf:remove)      SHAKER_PKG_CMD=(tdnf remove -y "$@") ;;
+        tdnf:clean)       SHAKER_PKG_CMD=(tdnf clean all) ;;
+
+        dnf:check|microdnf:check|yum:check|tdnf:check|zypper:check)
+                          SHAKER_PKG_CMD=(rpm -q "$@") ;;
+
+        zypper:update)    SHAKER_PKG_CMD=(zypper --non-interactive refresh) ;;
+        zypper:install)   SHAKER_PKG_CMD=(zypper --non-interactive install --no-recommends "$@") ;;
+        zypper:remove)    SHAKER_PKG_CMD=(zypper --non-interactive remove "$@") ;;
+        zypper:clean)     SHAKER_PKG_CMD=(zypper --non-interactive clean -a) ;;
+
+        apk:update)       SHAKER_PKG_CMD=(apk update) ;;
+        apk:install)      SHAKER_PKG_CMD=(apk add --no-cache "$@") ;;
+        apk:remove)       SHAKER_PKG_CMD=(apk del "$@") ;;
+        apk:clean)        SHAKER_PKG_CMD=(true) ;;
+        apk:check)        SHAKER_PKG_CMD=(apk info -e "$@") ;;
+
+        pacman:update)    SHAKER_PKG_CMD=(pacman -Sy --noconfirm) ;;
+        pacman:install)   SHAKER_PKG_CMD=(pacman -S --noconfirm --needed "$@") ;;
+        pacman:remove)    SHAKER_PKG_CMD=(pacman -Rs --noconfirm "$@") ;;
+        pacman:clean)     SHAKER_PKG_CMD=(pacman -Scc --noconfirm) ;;
+        pacman:check)     SHAKER_PKG_CMD=(pacman -Qi "$@") ;;
+
+        *)
+            log_event "error" "Unsupported package manager '${mgr}' or operation '${op}'"
+            return 1
+            ;;
+    esac
+
+}
+
+
+##############################################################################
+#
+# Function: pkg_run
+#
+# Runs the command stored in SHAKER_PKG_CMD with the right privileges and in
+# non-interactive mode. Honours BH_SHAKER_DRY_RUN.
+#
+##############################################################################
+pkg_run() {
+
+    local prefix=()
+
+    if (( EUID != 0 )); then
+        if command -v sudo >/dev/null 2>&1; then
+            prefix=(sudo -E)
+        else
+            log_event "error" "Root privileges required to run: ${SHAKER_PKG_CMD[*]}"
+            return 1
+        fi
+    fi
+
+    if is_boolean_yes "${BH_SHAKER_DRY_RUN:-false}"; then
+        log_event "info" "[dry-run] ${prefix[*]} ${SHAKER_PKG_CMD[*]}"
+        return 0
+    fi
+
+    log_event "debug" "Running: ${prefix[*]} ${SHAKER_PKG_CMD[*]}"
+    DEBIAN_FRONTEND=noninteractive "${prefix[@]}" "${SHAKER_PKG_CMD[@]}"
+
+}
+
+
+##############################################################################
+#
+# Function: pkg_install / pkg_remove / pkg_update / pkg_clean / pkg_is_installed
+#
+# Public front-end. Names are logical (see pkg_resolve).
+#
+# Usage:
+#   pkg_install <name>...      pkg_remove <name>...
+#   pkg_update                 pkg_clean
+#   pkg_is_installed <name>...
+#
+##############################################################################
+pkg_install() {
+
+    local name real parts names=()
+
+    for name in "$@"; do
+        real="$(pkg_resolve "${name}")"
+        read -ra parts <<< "${real}"       # a logical name may map to several packages
+        names+=("${parts[@]}")
+    done
+
+    (( ${#names[@]} > 0 )) || return 0
+    pkg_build_command install "${names[@]}" && pkg_run
+
+}
+
+pkg_remove() {
+
+    local name real parts names=()
+
+    for name in "$@"; do
+        real="$(pkg_resolve "${name}")"
+        read -ra parts <<< "${real}"       # a logical name may map to several packages
+        names+=("${parts[@]}")
+    done
+
+    (( ${#names[@]} > 0 )) || return 0
+    pkg_build_command remove "${names[@]}" && pkg_run
+
+}
+
+pkg_update() {
+    pkg_build_command update && pkg_run
+}
+
+pkg_clean() {
+    pkg_build_command clean && pkg_run
+}
+
+pkg_is_installed() {
+
+    local name real part parts
+
+    for name in "$@"; do
+        real="$(pkg_resolve "${name}")"
+        read -ra parts <<< "${real}"
+        for part in "${parts[@]}"; do
+            pkg_build_command check "${part}" || return 1
+            "${SHAKER_PKG_CMD[@]}" >/dev/null 2>&1 || return 1
+        done
+    done
+
+    return 0
+
+}
