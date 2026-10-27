@@ -16,6 +16,17 @@ items marked **(contract)** need a change on both sides.
 | 5 | End-to-end package: nginx built from source and run through Shaker | ✅ (manual + contract test) |
 | 6 | Persistence, arbitrary uid / OpenShift, service helpers | ✅ basic (see 0.4+) |
 
+## 0.3.x - Distillery integration (done)
+
+| Item | State |
+|---|---|
+| Platform check (`BH_PKG_ARCH`/`BH_PKG_LIBC`) in `install` and `verify` | ✅ |
+| `mutable` records, `verify --files` against `files.sha256` | ✅ |
+| `bundle.sha256` digest + signature, `--require-signature`, pinned fingerprints | ✅ |
+| `shaker restore <artifact>`: Distillery artifacts without Distillery | ✅ (tested against a real NiFi chain) |
+| `shaker up`: install/init dependencies from `manifest.depends` first | ⬜ |
+| musl in the CI matrix (Alpine leg exists; `restore`/`verify` use only busybox-compatible tar/sed/find) | 🚧 not run on busybox yet |
+
 ## 0.4 - operability
 
 | Item | Detail | Why |
@@ -48,7 +59,7 @@ items marked **(contract)** need a change on both sides.
 | ⬜ Helm/Kustomize skeleton from the map | parameters become values/overlays |
 | ⬜ `shaker docs <pkg>` | generate the parameter reference (markdown) from the map |
 | ⬜ Shell completion | bash/zsh for verbs, packages, declared flags |
-| ⬜ Bundle signature | verify a detached signature (minisign/cosign) of the bundle before `install` (**contract**) |
+| 🚧 Bundle signature | ✅ OpenPGP detached signature of `bundle.sha256` verified by `install`/`verify` against pinned fingerprints (with Distillery `artifacts.signing`); ⬜ minisign/cosign |
 | ⬜ Compliance report | `shaker report` aggregating verify/state into a NIS2-friendly evidence document |
 | ⬜ More distro coverage | Debian/Ubuntu old LTS, SLES, Amazon Linux in CI; `pkgmap` growth |
 

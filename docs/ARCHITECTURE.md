@@ -62,6 +62,8 @@ lib/rosetta.libsh       parameter model and resolver
 lib/state.libsh         state files, event log
 lib/service.libsh       PID-file helpers
 lib/spec.libsh          bundle reader (runtime.spec, manifest.env)
+lib/seal.libsh          platform, bundle digest and signature, installed-files check
+lib/artifact.libsh      shaker restore: verified unpacking of a Distillery artifact
 lib/lifecycle.libsh     the verbs
 share/pkgmap.map        logical → real package names per family
 assets/banner.txt

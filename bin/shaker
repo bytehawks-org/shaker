@@ -22,9 +22,15 @@ Lifecycle (driven by the Distillery bundle of the package):
   init <pkg> [opts]          parameters -> templates, persistence, hooks (idempotent, every start)
   run <pkg> [opts] [-- args] init + start the service (PID 1; --daemon for hosts without supervisor)
   stop <pkg>                 stop a service started with --daemon
-  verify <pkg> [--strict] [--no-health]   audit: user, permissions, parameters, drift, health
+  verify <pkg> [--strict] [--no-health] [--files] [--require-signature]
+                             audit: platform, bundle seal and signature, user, permissions, parameters, drift, health;
+                             --files also checks every installed file against the bundle's files.sha256
   status <pkg>               what was applied and when
   unit <pkg>                 print a hardened systemd unit
+
+Artifacts (no Distillery needed):
+  restore <artifact.tar.gz> [--sidecar=FILE] [--force] [--require-signature]
+                             check sha256, signature, platform and paths of a Distillery artifact, then unpack it into BH_ROOT
 
 Parameters (Rosetta):
   env <pkg> [opts]           resolve CLI > ENV > ENV_FILE > alias > config file > default
@@ -124,6 +130,7 @@ main() {
         exec)       detect_all; cmd_exec "$@" ;;
         install|init|run|stop|verify|status|unit)
                     detect_all; cmd_lifecycle "${command}" "$@" ;;
+        restore)    detect_all; artifact_restore "$@" ;;
         render)     render_template "$@" ;;
         pkg)
             local op="${1:?pkg operation required}"; shift

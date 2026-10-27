@@ -31,7 +31,9 @@ Bitnami images (`libos.sh`, `libfs.sh`, `libfile.sh`, `<app>-env.sh`, `setup.sh`
 | **Distro-agnostic** | bash ≥ 4.2 + POSIX tools; systemd optional; apt, dnf, microdnf, yum, tdnf, zypper, apk, pacman; glibc and musl; amd64/arm64 |
 | **Tracked** | `state` per package (what, when, which build recipe) + append-only event log; drift detection of rendered files |
 | **Secure by default** | config files are parsed, never sourced; no `eval`; secrets masked in every output; privileges dropped with `exec` (service stays PID 1); arbitrary-uid / OpenShift ready |
-| **Tested** | 139 shell assertions, a CI workflow with a 6-distribution matrix (Debian, Fedora, Rocky, openSUSE, Arch, Alpine), end-to-end contract test against Distillery (a real nginx 1.28 built from source with Distillery was installed, run and verified through Shaker) |
+| **Verifiable** | `verify --files` checks every installed file against the build; bundles carry a digest and an optional OpenPGP signature checked against **your** pinned fingerprints; `restore` installs a [Distillery](https://github.com/bytehawks-org/distillery) artifact with only bash and tar (nothing written before sha256, signature, platform and path checks pass) |
+| **Standalone** | works with a hand-written bundle; every Distillery-specific check is skipped when its file is absent ([docs/INTEGRATION in Distillery](https://github.com/bytehawks-org/distillery/blob/main/docs/INTEGRATION.md)) |
+| **Tested** | 195 shell assertions, a CI workflow with a 6-distribution matrix (Debian, Fedora, Rocky, openSUSE, Arch, Alpine), end-to-end contract test against Distillery (a real nginx 1.28 built from source with Distillery was installed, run and verified through Shaker) |
 
 ## Quick start
 

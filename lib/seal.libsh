@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+#
+# seal.libsh - trust checks on what Distillery installed. Everything here is optional: a bundle without
+# `bundle.sha256`, `files.sha256` or platform fields (a hand-written one, an older Distillery) simply skips the check.
+#
+#   platform   BH_PKG_ARCH / BH_PKG_LIBC of the build against the host (a glibc build does not run on Alpine)
+#   digest     bundle.sha256 (sha256sum format) over the contract files, assets and files.sha256
+#   signature  bundle.sha256.asc, an OpenPGP detached signature, accepted only from pinned signers
+#   files      files.sha256 against the installed tree, skipping the `mutable` paths of runtime.spec
+#
+# Trust is configured with the environment (never read from the bundle itself):
+#   BH_SHAKER_TRUSTED_FINGERPRINTS   full 40-hex primary fingerprints, comma or space separated
+#   BH_SHAKER_TRUSTED_KEYS           file with their public keys (default: exported from the local gpg keyring)
+#   BH_SHAKER_REQUIRE_SIGNATURE      true = install and verify fail unless the bundle is signed by a pinned signer
+#   BH_SHAKER_ALLOW_PLATFORM_MISMATCH  true = only warn when the bundle was built for another arch / libc
+
+
+##############################################################################
+#
+# Function: seal_check_platform
+#
+# Compares the platform recorded in the manifest with the host.
+#
+# Usage: seal_check_platform [arch libc]     (default: BH_PKG_ARCH / BH_PKG_LIBC of the loaded bundle)
+# Output: one line describing the result.
+# Returns: 0 match, 1 mismatch, 2 nothing to compare (older bundle or host not detected).
+#
+##############################################################################
+seal_check_platform() {
+
+    local want_arch="${1-${BH_PKG_ARCH:-}}" want_libc="${2-${BH_PKG_LIBC:-}}"
+    local have_arch="${BH_SHAKER_ARCH:-}" have_libc="${BH_SHAKER_LIBC:-}"
+
+    if [[ -z "${want_arch}${want_libc}" ]]; then
+        echo "bundle does not record its platform"
+        return 2
+    fi
+    if [[ -n "${want_arch}" && -n "${have_arch}" && "${want_arch}" != "${have_arch}" ]]; then
+        echo "built for ${want_arch}, this host is ${have_arch}"
+        return 1
+    fi
+    if [[ -n "${want_libc}" && -n "${have_libc}" && "${have_libc}" != "unknown" && "${want_libc}" != "${have_libc}" ]]; then
+        echo "built for ${want_libc}, this host uses ${have_libc}"
+        return 1
+    fi
+
+    echo "${want_arch:-?}/${want_libc:-?}"
+
+}
+
+
+##############################################################################
+#
+# Function: seal_check_digest
+#
+# Checks every file listed in <bundle>/bundle.sha256 against its hash.
+#
+# Usage: seal_check_digest <bundle-dir>
+# Output: a line describing the result (the first problem, or the number of files).
+# Returns: 0 intact, 1 modified or missing file, 2 no bundle.sha256.
+#
+##############################################################################
+seal_check_digest() {
+
+    local bundle="${1:?bundle directory required}" digest name count=0 actual
+
+    [[ -r "${bundle}/bundle.sha256" ]] || { echo "no bundle.sha256"; return 2; }
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ -z "${line}" ]] && continue
+        digest="${line%%  *}"; name="${line#*  }"
+        case "${name}" in /*|*..*) echo "unsafe path '${name}' in bundle.sha256"; return 1 ;; esac
+        if [[ ! -f "${bundle}/${name}" ]]; then echo "missing ${name}"; return 1; fi
+        actual="$(sha256_of_file "${bundle}/${name}")"
+        if [[ "${actual}" != "${digest}" ]]; then echo "modified ${name}"; return 1; fi
+        count=$((count + 1))
+    done < "${bundle}/bundle.sha256"
+
+    echo "${count} files match"
+
+}
+
+
+##############################################################################
+#
+# Function: seal_verify_gpg
+#
+# Verifies the detached signature <sig> of <file> with the pinned signers.
+#
+# Usage: seal_verify_gpg <file> <sig> <fingerprint...>
+# Output: the signer's primary fingerprint, or the reason.
+# Returns: 0 good signature by a pinned signer, 1 bad / foreign / unusable.
+#
+##############################################################################
+seal_verify_gpg() {
+
+    local file="${1:?}" sig="${2:?}"; shift 2
+    local -a allowed=("$@")
+    local home keys status signer fpr rc=1 line
+    local -a fields
+
+    command -v gpg >/dev/null 2>&1 || { echo "gpg not installed"; return 1; }
+
+    home="$(mktemp -d "${TMPDIR:-/tmp}/bh-gpg.XXXXXX")" || return 1
+    chmod 700 "${home}"
+    keys="${BH_SHAKER_TRUSTED_KEYS:-}"
+
+    if [[ -n "${keys}" ]]; then
+        gpg --homedir "${home}" --batch --no-tty --quiet --import "${keys}" >/dev/null 2>&1 \
+            || { echo "cannot import ${keys}"; rm -rf "${home}"; return 1; }
+    else
+        gpg --batch --no-tty --armor --export "${allowed[@]}" 2>/dev/null \
+            | gpg --homedir "${home}" --batch --no-tty --quiet --import >/dev/null 2>&1 \
+            || { echo "trusted keys are not in the local gpg keyring (set BH_SHAKER_TRUSTED_KEYS)"; rm -rf "${home}"; return 1; }
+    fi
+
+    status="$(gpg --homedir "${home}" --batch --no-tty --no-autostart --status-fd 1 --verify "${sig}" "${file}" 2>/dev/null || true)"
+    gpgconf --homedir "${home}" --kill all >/dev/null 2>&1 || true
+    rm -rf "${home}"
+
+    if grep -qE '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY)' <<< "${status}"; then
+        echo "signature is not valid"
+        return 1
+    fi
+    grep -q '^\[GNUPG:\] GOODSIG' <<< "${status}" || { echo "no good signature"; return 1; }
+
+    while IFS= read -r line; do
+        [[ "${line}" == "[GNUPG:] VALIDSIG "* ]] || continue
+        read -ra fields <<< "${line}"
+        signer="${fields[11]:-${fields[2]}}"          # primary key fingerprint, not the signing subkey
+        for fpr in "${allowed[@]}"; do
+            [[ "${signer^^}" == "${fpr^^}" ]] && rc=0
+        done
+        if (( rc == 0 )); then echo "${signer}"; return 0; fi
+        echo "signed by ${signer}, which is not a pinned signer"
+        return 1
+    done <<< "${status}"
+
+    echo "no valid signature"
+    return 1
+
+}
+
+
+##############################################################################
+#
+# Function: seal_check_signature
+#
+# Checks <bundle>/bundle.sha256.asc against BH_SHAKER_TRUSTED_FINGERPRINTS.
+#
+# Output: the signer, or the reason. Returns: 0 signed by a pinned signer, 1 bad or foreign signature,
+#         2 not signed, 3 signed but no trusted fingerprint configured.
+#
+##############################################################################
+seal_check_signature() {
+
+    local bundle="${1:?bundle directory required}"
+    local -a fingerprints
+    local list="${BH_SHAKER_TRUSTED_FINGERPRINTS:-}"
+
+    [[ -r "${bundle}/bundle.sha256" && -r "${bundle}/bundle.sha256.asc" ]] || { echo "not signed"; return 2; }
+
+    list="${list//,/ }"
+    read -ra fingerprints <<< "${list}"
+    (( ${#fingerprints[@]} > 0 )) || { echo "signed, but BH_SHAKER_TRUSTED_FINGERPRINTS is empty"; return 3; }
+
+    seal_verify_gpg "${bundle}/bundle.sha256" "${bundle}/bundle.sha256.asc" "${fingerprints[@]}"
+
+}
+
+
+##############################################################################
+#
+# Function: seal_require_trust
+#
+# What `install` does before touching the system when BH_SHAKER_REQUIRE_SIGNATURE is on: the digest must match and
+# the signature must come from a pinned signer. Without the variable it only refuses a digest that does not match.
+#
+# Usage: seal_require_trust <bundle-dir>
+# Returns: 0 allowed, 1 refused (the reason is logged).
+#
+##############################################################################
+seal_require_trust() {
+
+    local bundle="${1:?bundle directory required}" out rc
+
+    out="$(seal_check_digest "${bundle}")" && rc=0 || rc=$?
+    if (( rc == 1 )); then log_event "error" "bundle ${bundle}: ${out}"; return 1; fi
+
+    if is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}"; then
+        (( rc == 0 )) || { log_event "error" "bundle ${bundle}: unsigned or without digest (BH_SHAKER_REQUIRE_SIGNATURE)"; return 1; }
+        out="$(seal_check_signature "${bundle}")" && rc=0 || rc=$?
+        if (( rc != 0 )); then log_event "error" "bundle ${bundle}: ${out} (BH_SHAKER_REQUIRE_SIGNATURE)"; return 1; fi
+        log_event "info" "Bundle signed by ${out}"
+    fi
+
+}
+
+
+##############################################################################
+#
+# Function: seal_check_platform_install
+#
+# `install` refuses a bundle built for another architecture or C library (it would install but not run), unless
+# BH_SHAKER_ALLOW_PLATFORM_MISMATCH is true.
+#
+##############################################################################
+seal_check_platform_install() {
+
+    local out rc
+
+    out="$(seal_check_platform)" && rc=0 || rc=$?
+    (( rc == 1 )) || return 0
+
+    if is_boolean_yes "${BH_SHAKER_ALLOW_PLATFORM_MISMATCH:-false}"; then
+        log_event "warn" "${LC_PKG}: ${out} (allowed by BH_SHAKER_ALLOW_PLATFORM_MISMATCH)"
+        return 0
+    fi
+    log_event "error" "${LC_PKG}: ${out}; refusing to install (BH_SHAKER_ALLOW_PLATFORM_MISMATCH=true overrides)"
+    return 1
+
+}
+
+
+# is_mutable <absolute path>: true when the path is, or is below, a `mutable` path of runtime.spec
+_seal_is_mutable() {
+
+    local path="${1:?}" entry
+
+    for entry in "${SPEC_MUTABLE[@]+"${SPEC_MUTABLE[@]}"}"; do
+        entry="$(expand_vars "${entry}" 2>/dev/null)" || continue
+        [[ "${path}" == "${entry}" || "${path}" == "${entry}/"* ]] && return 0
+    done
+    return 1
+
+}
+
+
+##############################################################################
+#
+# Function: seal_check_files
+#
+# Compares the installed tree with <bundle>/files.sha256 (paths relative to BH_ROOT). Paths the runtime rewrites on
+# purpose (`mutable` records) are skipped. Problems are printed, at most 20.
+#
+# Usage: seal_check_files <bundle-dir>
+# Output: "<checked> files, <skipped> mutable" on success, otherwise one line per problem.
+# Returns: 0 intact, 1 problems, 2 no files.sha256.
+#
+##############################################################################
+seal_check_files() {
+
+    local bundle="${1:?bundle directory required}" line digest rel full actual checked=0 skipped=0 problems=0
+
+    [[ -r "${bundle}/files.sha256" ]] || { echo "no files.sha256"; return 2; }
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ -z "${line}" ]] && continue
+        digest="${line%%  *}"; rel="${line#*  }"
+        case "${rel}" in /*|*..*) echo "unsafe path '${rel}'"; return 1 ;; esac
+        full="${BH_ROOT}/${rel%/}"
+
+        if _seal_is_mutable "${full}"; then skipped=$((skipped + 1)); continue; fi
+        checked=$((checked + 1))
+
+        if [[ "${rel}" == */ ]]; then
+            [[ -d "${full}" ]] || { problems=$((problems + 1)); (( problems > 20 )) || echo "missing directory ${rel}"; }
+        elif [[ -L "${full}" ]]; then
+            actual="$(sha256_of_string "$(readlink "${full}")")"
+            [[ "${actual}" == "${digest}" ]] || { problems=$((problems + 1)); (( problems > 20 )) || echo "modified link ${rel}"; }
+        elif [[ ! -e "${full}" ]]; then
+            problems=$((problems + 1)); (( problems > 20 )) || echo "missing ${rel}"
+        elif [[ "$(sha256_of_file "${full}")" != "${digest}" ]]; then
+            problems=$((problems + 1)); (( problems > 20 )) || echo "modified ${rel}"
+        fi
+    done < "${bundle}/files.sha256"
+
+    if (( problems > 0 )); then
+        echo "${problems} problem(s) in ${checked} checked paths"
+        return 1
+    fi
+    echo "${checked} paths intact, ${skipped} mutable skipped"
+
+}

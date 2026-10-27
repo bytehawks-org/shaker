@@ -24,6 +24,8 @@ Parsed by `lifecycle_parse_args` for `install init run stop verify status unit e
 | `--reinit` | (`init`/`run`) run `first_init` hooks again |
 | `--strict` | (`verify`) warnings fail |
 | `--no-health` | (`verify`) skip the health check (build time, CI) |
+| `--files` | (`verify`) also check every installed file against the bundle's `files.sha256`, skipping `mutable` paths |
+| `--require-signature` | (`install`, `verify`) refuse a bundle not signed by a pinned signer (same as `BH_SHAKER_REQUIRE_SIGNATURE=true`) |
 | `--format=` | (`env`) `export` (default), `dotenv`, `explain` |
 | `--validate` | (`env`) validate only, print nothing |
 | `--help-vars` | (`env`) describe the package parameters |
@@ -53,11 +55,24 @@ Resolves parameters, then `pre_init` hooks → persistence → templates → `fi
 Sends the package's stop signal (`stopsignal`, e.g. `QUIT` for nginx) to the PID file process, waits
 `BH_SHAKER_STOP_TIMEOUT` (30 s) then `SIGKILL`. Removes the PID file. No PID file → success.
 
-### `shaker verify <pkg> [params] [--strict] [--no-health]`
+### `shaker restore <artifact.tar.gz> [--sidecar=FILE] [--force] [--require-signature]`
+Unpacks a Distillery artifact into `BH_ROOT` without Distillery. `<name>.json` (and `<name>.json.asc` if present) must sit next to the
+tarball, or be given with `--sidecar`. Nothing is written before all of these pass: the tarball matches the sha256 recorded in the
+sidecar; the sidecar signature comes from a pinned signer (`BH_SHAKER_TRUSTED_FINGERPRINTS`; required with `--require-signature`);
+the build platform equals this host (`BH_SHAKER_ALLOW_PLATFORM_MISMATCH`); the build root equals `BH_ROOT` (paths are baked into the
+files); member names are relative and links stay inside the tree. It extracts into a staging directory, re-checks the links, copies
+into the root and verifies the restored bundle's `bundle.sha256`. Restoring the same recipe again is a no-op (`--force` repeats it).
+Then: `shaker install <pkg>`.
+
+### `shaker verify <pkg> [params] [--strict] [--no-health] [--files] [--require-signature]`
 Read-only audit. One line per check:
 
 ```
 [OK  ] bundle                       /opt/bytehawks/nginx/.bytehawks (nginx 1.28.0)
+[OK  ] platform                     amd64/glibc
+[OK  ] bundle digest                5 files match
+[OK  ] bundle signature             signed by B54C4E48307BEE7831E844365799A3FD70E80C1F
+[OK  ] installed files              540 paths intact, 8 mutable skipped
 [OK  ] requires openssl
 [OK  ] user nginx                   uid 1001
 [OK  ] dir /opt/bytehawks/nginx/run 1001:0 775
@@ -67,6 +82,11 @@ Read-only audit. One line per check:
 [FAIL] health tcp                   127.0.0.1:8080 closed
 -- 9 ok, 0 warning, 1 failed
 ```
+The first four lines come from the Distillery seal and are skipped when the bundle does not carry it (hand-written
+bundle, older Distillery): **platform** (`BH_PKG_ARCH`/`BH_PKG_LIBC` against the host; FAIL on mismatch unless
+`BH_SHAKER_ALLOW_PLATFORM_MISMATCH=true`), **bundle digest** (`bundle.sha256`), **bundle signature** (`bundle.sha256.asc`
+against `BH_SHAKER_TRUSTED_FINGERPRINTS`; WARN when signed but nothing is pinned, FAIL when required and missing or foreign)
+and, with `--files`, **installed files**. Problems under `--files` are listed below the line (at most 20).
 Pass the same parameters you used for `init` (or put them in the config file / environment):
 CLI flags are not persisted, so a bare `verify` compares against defaults.
 

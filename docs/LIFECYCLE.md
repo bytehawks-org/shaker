@@ -11,6 +11,13 @@ The verbs map one-to-one onto what Bitnami split across `postunpack.sh`, `setup.
 | `stop` | host without supervisor | any | yes | - |
 | `verify` | anytime (probe, cron, CI) | any (read-only) | read-only | - |
 
+## Before `install`: what is being installed
+
+`install` first checks the **platform** of the bundle (architecture and C library recorded by Distillery against the host) and its
+**seal** (`bundle.sha256`; plus the signature when `BH_SHAKER_REQUIRE_SIGNATURE` is on), and refuses before touching the system. Bundles
+that do not record them install as before. To get the bundle onto the host without Distillery use `shaker restore`
+([CLI](CLI.md#shaker-restore-artifacttargz---sidecarfile---force---require-signature)).
+
 ## Install
 
 For each record of the spec:
