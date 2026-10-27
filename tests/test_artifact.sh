@@ -88,6 +88,20 @@ _artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
 assert_fail "restore: absolute symlink is refused" artifact_restore "${t}/h/${n}.tar.gz"
 assert_fail "restore: neither is anything of it installed" test -e "${BH_ROOT}/demo/abs"
 
+n="bh--demo--stable--application--amd64--1.0--444444444444"
+rm -rf "${t}/h/src" "${t}/h/src2"; mkdir -p "${t}/h/src/demo" "${t}/h/src2/demo/l"
+ln -s ../../../../tmp "${t}/h/src/demo/l"; printf 'x' > "${t}/h/src2/demo/l/evil"
+tar -cf "${t}/h/${n}.tar" -C "${t}/h/src" demo/l; tar -rf "${t}/h/${n}.tar" -C "${t}/h/src2" demo/l/evil
+gzip -f "${t}/h/${n}.tar"; mv "${t}/h/${n}.tar.gz" "${t}/h/${n}.tar.gz"
+_artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
+assert_fail "restore: member written through an archive symlink is refused" artifact_restore "${t}/h/${n}.tar.gz"
+assert_fail "restore: ... and nothing was written outside" test -e /tmp/evil
+
+assert_ok "inside: sibling link" _artifact_stays_inside "demo/bin" "tool"
+assert_ok "inside: up one level, still inside" _artifact_stays_inside "demo/bin" "../lib/x.so"
+assert_fail "inside: up past the root" _artifact_stays_inside "demo/bin" "../../../etc"
+assert_fail "inside: up past the root from the top" _artifact_stays_inside "." ".."
+
 # signatures
 if command -v gpg >/dev/null 2>&1; then
     export GNUPGHOME="${t}/gnupg"; mkdir -m 700 "${GNUPGHOME}"

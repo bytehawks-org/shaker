@@ -27,6 +27,24 @@ _artifact_member_ok() {
 }
 
 
+# _artifact_stays_inside <directory of the link, relative to the tree> <link target>
+# Lexical resolution (no readlink -m: BusyBox has none): 0 when the target stays inside the tree.
+_artifact_stays_inside() {
+
+    local -a parts out=()
+    local part
+    IFS='/' read -ra parts <<< "${1}/${2}"
+    for part in "${parts[@]}"; do
+        case "${part}" in
+            ""|.) ;;
+            ..)   (( ${#out[@]} > 0 )) || return 1; out=("${out[@]:0:${#out[@]}-1}") ;;
+            *)    out+=("${part}") ;;
+        esac
+    done
+
+}
+
+
 ##############################################################################
 #
 # Function: artifact_restore
@@ -125,7 +143,25 @@ artifact_restore() {
         log_event "error" "restore: archive contains a hard link that leaves the tree"; return 1
     fi
 
-    local stage link target resolved
+    # a member must not be written *through* a symlink the archive creates (link -> ../.., then link/file)
+    local line name symlink
+    local -a symlinks=()
+    while IFS= read -r line; do
+        [[ "${line}" == l* ]] || continue
+        name="$(sed -E 's/^l[^ ]+ +[^ ]+ +[0-9]+ +[0-9-]+ +[0-9:]+ +(.*) -> .*$/\1/' <<< "${line}")"
+        [[ -n "${name}" && "${name}" != "${line}" ]] && symlinks+=("${name%/}")
+    done <<< "${listing}"
+    if (( ${#symlinks[@]} > 0 )); then
+        while IFS= read -r member; do
+            for symlink in "${symlinks[@]}"; do
+                if [[ "${member}" == "${symlink}/"* ]]; then
+                    log_event "error" "restore: ${member} would be written through the link ${symlink}"; return 1
+                fi
+            done
+        done < <(tar -tzf "${tarball}")
+    fi
+
+    local stage link target
     mkdir -p "${BH_ROOT}" || return 1
     stage="$(mktemp -d "${BH_ROOT%/}/.restore.XXXXXX")" || return 1
     # shellcheck disable=SC2064
@@ -136,11 +172,8 @@ artifact_restore() {
     while IFS= read -r -d '' link; do
         target="$(readlink "${link}")"
         case "${target}" in /*) log_event "error" "restore: absolute link ${link#"${stage}"/} -> ${target}"; return 1 ;; esac
-        resolved="$(readlink -m "$(dirname "${link}")/${target}")"
-        case "${resolved}" in
-            "${stage}"|"${stage}"/*) ;;
-            *) log_event "error" "restore: link ${link#"${stage}"/} -> ${target} leaves the tree"; return 1 ;;
-        esac
+        _artifact_stays_inside "$(dirname "${link#"${stage}"/}")" "${target}" \
+            || { log_event "error" "restore: link ${link#"${stage}"/} -> ${target} leaves the tree"; return 1; }
     done < <(find "${stage}" -type l -print0)
 
     cp -a "${stage}/." "${BH_ROOT}/" || { log_event "error" "restore: cannot copy into ${BH_ROOT}"; return 1; }
