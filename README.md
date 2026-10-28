@@ -125,6 +125,7 @@ Shaker itself is relocatable: it finds its own libraries from the script locatio
 | [PORTABILITY](docs/PORTABILITY.md) | supported platforms, required tools, rules for contributors |
 | [BITNAMI-MIGRATION](docs/BITNAMI-MIGRATION.md) | what Bitnami did, how each piece maps, how to port an app |
 | [SECURITY](docs/SECURITY.md) | threat model and guarantees |
+| [FIRST-RUN](docs/FIRST-RUN.md) | checklist for the first run of CI on GitHub and of `restore`/`up`/`verify --files` on a real Alpine (BusyBox) |
 | [TESTING](docs/TESTING.md) | test runner, fixtures, CI, contributing |
 | [ROADMAP](ROADMAP.md) / [CHANGELOG](CHANGELOG.md) | where it is going / what changed |
 

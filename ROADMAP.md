@@ -74,7 +74,7 @@ items marked **(contract)** need a change on both sides.
 
 ## Known gaps today (tracked, honest)
 
-* The multi-distribution CI matrix is defined but has not been observed running on GitHub yet.
+* The multi-distribution CI matrix is defined but has not been observed running on GitHub yet; `restore`, `up` and `verify --files` have not run on BusyBox/Alpine. Checklist: [docs/FIRST-RUN.md](docs/FIRST-RUN.md).
 * YAML/JSON configuration needs an optional tool; no pure-bash parser.
 * `events.log` is unbounded; no `uninstall`; no upgrade logic; `depends` informational only at runtime.
 * `shaker unit` targets systemd only.
