@@ -64,6 +64,7 @@ lib/service.libsh       PID-file helpers
 lib/spec.libsh          bundle reader (runtime.spec, manifest.env)
 lib/seal.libsh          platform, bundle digest and signature, installed-files check
 lib/artifact.libsh      shaker restore: verified unpacking of a Distillery artifact
+lib/up.libsh            shaker up: dependency order from BH_PKG_DEPENDS
 lib/lifecycle.libsh     the verbs
 share/pkgmap.map        logical → real package names per family
 assets/banner.txt

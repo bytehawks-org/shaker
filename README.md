@@ -33,7 +33,7 @@ Bitnami images (`libos.sh`, `libfs.sh`, `libfile.sh`, `<app>-env.sh`, `setup.sh`
 | **Secure by default** | config files are parsed, never sourced; no `eval`; secrets masked in every output; privileges dropped with `exec` (service stays PID 1); arbitrary-uid / OpenShift ready |
 | **Verifiable** | `verify --files` checks every installed file against the build; bundles carry a digest and an optional OpenPGP signature checked against **your** pinned fingerprints; `restore` installs a [Distillery](https://github.com/bytehawks-org/distillery) artifact with only bash and tar (nothing written before sha256, signature, platform and path checks pass) |
 | **Standalone** | works with a hand-written bundle; every Distillery-specific check is skipped when its file is absent ([docs/INTEGRATION in Distillery](https://github.com/bytehawks-org/distillery/blob/main/docs/INTEGRATION.md)) |
-| **Tested** | 201 shell assertions, a CI workflow with a 6-distribution matrix (Debian, Fedora, Rocky, openSUSE, Arch, Alpine), end-to-end contract test against Distillery (a real nginx 1.28 built from source with Distillery was installed, run and verified through Shaker) |
+| **Tested** | 221 shell assertions, a CI workflow with a 6-distribution matrix (Debian, Fedora, Rocky, openSUSE, Arch, Alpine), end-to-end contract test against Distillery (a real nginx 1.28 built from source with Distillery was installed, run and verified through Shaker) |
 
 ## Quick start
 
@@ -52,6 +52,15 @@ shaker verify nginx --port=8081           # user, perms, parameters, drift, heal
 shaker run nginx --port=8081              # exec nginx as PID 1 (container)
 sudo shaker run nginx --daemon            # or detached with a PID file (host without supervisor)
 shaker unit nginx | sudo tee /etc/systemd/system/nginx.service
+
+# 4. a stack: dependencies first, from the bundle (Distillery's BH_PKG_DEPENDS), then the package
+shaker up nifi --plan                     # temurin, nifi
+shaker up nifi --run                      # install + init in that order, then start nifi
+
+# 5. no Distillery on this host: unpack a signed artifact, prove what is installed
+export BH_SHAKER_TRUSTED_FINGERPRINTS=<primary fingerprint> BH_SHAKER_REQUIRE_SIGNATURE=true
+shaker restore bh--nifi--stable--application--amd64--2.9.0--eba708a011c1.tar.gz
+shaker verify nifi --files --require-signature
 ```
 
 Container:

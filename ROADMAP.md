@@ -24,7 +24,7 @@ items marked **(contract)** need a change on both sides.
 | `mutable` records, `verify --files` against `files.sha256` | ✅ |
 | `bundle.sha256` digest + signature, `--require-signature`, pinned fingerprints | ✅ |
 | `shaker restore <artifact>`: Distillery artifacts without Distillery | ✅ (tested against a real NiFi chain) |
-| `shaker up`: install/init dependencies from `manifest.depends` first | ⬜ |
+| `shaker up`: install/init dependencies from `BH_PKG_DEPENDS` first, recipe check, cycles | ✅ (tested on a real NiFi → Temurin chain) |
 | musl in the CI matrix (Alpine leg exists; `restore`/`verify` use only busybox-compatible tar/sed/find) | 🚧 not run on busybox yet |
 
 ## 0.4 - operability
@@ -45,7 +45,7 @@ items marked **(contract)** need a change on both sides.
 |---|---|
 | ⬜ `uninstall` / `purge` | remove user, directories, state, symlinks; keep data unless `--purge-data` |
 | ⬜ Upgrade path | compare `installed_recipe`/`init_version` with the bundle, run `upgrade` hooks (`from → to`), refuse downgrades |
-| ⬜ Multi-package orchestration | `shaker up <app>`: honour `manifest.depends` ordering, init dependencies first |
+| ✅ Multi-package orchestration | `shaker up <app>`: dependency order from `BH_PKG_DEPENDS`, dependencies installed and initialized first; ⬜ `verify --with-deps`, ⬜ stop in reverse order |
 | ⬜ Rollback | keep the previous rendered config + state snapshot, `shaker rollback` |
 | ⬜ Transactional `init` | render everything to a staging dir, validate, then swap |
 | ⬜ OpenRC / SysV generators | `shaker unit --type=openrc|sysv` for non-systemd legacy hosts |

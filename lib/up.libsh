@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# up.libsh - bring a package and what it was built against up, in dependency order.
+#
+# Distillery lists the direct dependencies of a package in its manifest.env as
+#   BH_PKG_DEPENDS=<package>=<recipe sha256> <package>=<recipe sha256> ...
+# `shaker up <pkg>` walks that graph (each dependency's own bundle lists its dependencies), refuses to go on when an installed
+# dependency is not the build the package was made against, and then runs `install` and `init` for every unit that has a runtime
+# (libraries usually have none: they are skipped), dependencies first. A bundle without BH_PKG_DEPENDS (hand-written, older
+# Distillery) simply has no dependencies. Nothing here needs Distillery: only the bundles on disk.
+
+UP_ORDER=()
+declare -gA _UP_STATE=()
+
+
+# _up_bundle <pkg> <main|dep> : the bundle directory; --bundle=DIR applies to the package named on the command line only
+_up_bundle() {
+
+    if [[ "${2}" == "dep" ]]; then
+        BH_SHAKER_BUNDLE="" shaker_find_bundle "${1}"
+    else
+        shaker_find_bundle "${1}"
+    fi
+
+}
+
+
+# _up_env <bundle> <KEY> : a value from manifest.env, empty when absent
+_up_env() {
+
+    sed -n "s/^${2}=//p" "${1}/manifest.env" 2>/dev/null | head -n 1
+
+}
+
+
+# _up_visit <pkg> <main|dep> [wanted recipe] [required by]: depth first, dependencies before the package
+_up_visit() {
+
+    local pkg="${1}" role="${2}" wanted="${3:-}" parent="${4:-}" bundle have dep name recipe
+
+    case "${_UP_STATE[${pkg}]:-}" in
+        done)     return 0 ;;
+        visiting) log_event "error" "up: dependency cycle through ${pkg}"; return 1 ;;
+    esac
+
+    bundle="$(_up_bundle "${pkg}" "${role}")" \
+        || { [[ -n "${parent}" ]] && log_event "error" "up: ${parent} depends on ${pkg}, which is not installed (no bundle)"; return 1; }
+
+    if [[ -n "${wanted}" ]]; then
+        have="$(_up_env "${bundle}" BH_PKG_RECIPE)"
+        if [[ -n "${have}" && "${have}" != "${wanted}" ]]; then
+            log_event "error" "up: ${parent} was built against ${pkg} ${wanted:0:12}, but ${have:0:12} is installed (rebuild or reinstall one of them)"
+            return 1
+        fi
+    fi
+
+    _UP_STATE["${pkg}"]="visiting"
+    for dep in $(_up_env "${bundle}" BH_PKG_DEPENDS); do
+        name="${dep%%=*}"; recipe="${dep#*=}"
+        _up_visit "${name}" dep "${recipe}" "${pkg}" || return 1
+    done
+    _UP_STATE["${pkg}"]="done"
+    UP_ORDER+=("${pkg}")
+
+}
+
+
+##############################################################################
+#
+# Function: up_plan
+#
+# Usage: up_plan <package>
+# Sets UP_ORDER (dependencies first, the package last). Returns 1 on a missing dependency, a dependency whose installed
+# build is not the one recorded, or a cycle.
+#
+##############################################################################
+up_plan() {
+
+    UP_ORDER=(); _UP_STATE=()
+    _up_visit "${1:?package required}" main
+
+}
+
+
+# _up_has_runtime: the loaded bundle declares something to set up
+_up_has_runtime() {
+
+    [[ -n "${SPEC_USER_NAME}" ]] || (( ${#SPEC_DIRS[@]} + ${#SPEC_RUN[@]} + ${#SPEC_TEMPLATES[@]} + ${#SPEC_PERSIST[@]} + ${#SPEC_HOOKS[@]} > 0 ))
+
+}
+
+
+##############################################################################
+#
+# Function: up_apply
+#
+# Usage: up_apply <package> <main|dep> [lifecycle options...]
+# Runs install and init of one unit in a subshell (the shell keeps no state of it). Options (parameters, --config) are
+# those of the package named on the command line; dependencies are set up with their defaults and the environment.
+#
+##############################################################################
+up_apply() {
+
+    local pkg="${1}" role="${2}"; shift 2
+
+    (
+        if [[ "${role}" == "dep" ]]; then unset BH_SHAKER_BUNDLE; set --; fi
+        lifecycle_parse_args "${pkg}" "$@"
+        lifecycle_load || exit 1
+        if ! _up_has_runtime; then
+            log_event "info" "up: ${pkg} has no runtime to set up"
+            exit 0
+        fi
+        lifecycle_install || exit 1
+        lifecycle_resolve || { state_event "${pkg}" init fail parameters; exit 1; }
+        lifecycle_init || exit 1
+        log_event "info" "up: ${pkg} installed and initialized"
+    )
+
+}
+
+
+##############################################################################
+#
+# Function: up_all
+#
+# Usage: up_all <package> [lifecycle options...]
+# Plans, then sets up every unit in order; stops at the first failure.
+#
+##############################################################################
+up_all() {
+
+    local pkg="${1:?package required}"; shift
+    local unit n=0 total
+
+    up_plan "${pkg}" || return 1
+    total="${#UP_ORDER[@]}"
+    for unit in "${UP_ORDER[@]}"; do
+        n=$((n + 1))
+        log_event "info" "up: [${n}/${total}] ${unit}"
+        if [[ "${unit}" == "${pkg}" ]]; then up_apply "${unit}" main "$@"; else up_apply "${unit}" dep; fi \
+            || { log_event "error" "up: ${unit} failed; stopping"; return 1; }
+    done
+
+}

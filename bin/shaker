@@ -28,6 +28,10 @@ Lifecycle (driven by the Distillery bundle of the package):
   status <pkg>               what was applied and when
   unit <pkg>                 print a hardened systemd unit
 
+Dependencies:
+  up <pkg> [opts] [--plan] [--run]   install + init the dependencies of <pkg> (from the bundle's BH_PKG_DEPENDS) and <pkg>
+                             in dependency order; --plan only prints the order, --run then starts <pkg>
+
 Artifacts (no Distillery needed):
   restore <artifact.tar.gz> [--sidecar=FILE] [--force] [--require-signature]
                              check sha256, signature, platform and paths of a Distillery artifact, then unpack it into BH_ROOT
@@ -98,6 +102,31 @@ cmd_exec() {
 
 }
 
+cmd_up() {
+
+    local plan="false" run="false" arg
+    local -a args=()
+
+    for arg in "$@"; do
+        case "${arg}" in
+            --plan) plan="true" ;;
+            --run)  run="true" ;;
+            *)      args+=("${arg}") ;;
+        esac
+    done
+
+    lifecycle_parse_args "${args[@]}"
+    if [[ "${plan}" == "true" ]]; then
+        up_plan "${LC_PKG}" || exit 1
+        printf '%s\n' "${UP_ORDER[@]}"
+        return 0
+    fi
+
+    up_all "${args[@]}" || exit 1
+    if [[ "${run}" == "true" ]]; then cmd_lifecycle run "${args[@]}"; fi
+
+}
+
 # install / init / run / stop / verify / status / unit
 cmd_lifecycle() {
 
@@ -130,6 +159,7 @@ main() {
         exec)       detect_all; cmd_exec "$@" ;;
         install|init|run|stop|verify|status|unit)
                     detect_all; cmd_lifecycle "${command}" "$@" ;;
+        up)         detect_all; cmd_up "$@" ;;
         restore)    detect_all; artifact_restore "$@" ;;
         render)     render_template "$@" ;;
         pkg)

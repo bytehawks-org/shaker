@@ -10,6 +10,7 @@ The verbs map one-to-one onto what Bitnami split across `postunpack.sh`, `setup.
 | `run` | every start | root → service user, or arbitrary uid | - | `entrypoint.sh` + `run.sh` |
 | `stop` | host without supervisor | any | yes | - |
 | `verify` | anytime (probe, cron, CI) | any (read-only) | read-only | - |
+| `up` | provisioning, entrypoint of a stack | root or service uid | yes | `install` + `init` of the dependencies, then of the package |
 
 ## Before `install`: what is being installed
 

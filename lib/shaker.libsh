@@ -22,6 +22,7 @@ _SHAKER_LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${_SHAKER_LIB_DIR}/spec.libsh"
 . "${_SHAKER_LIB_DIR}/seal.libsh"
 . "${_SHAKER_LIB_DIR}/artifact.libsh"
+. "${_SHAKER_LIB_DIR}/up.libsh"
 . "${_SHAKER_LIB_DIR}/lifecycle.libsh"
 
 unset _SHAKER_LIB_DIR

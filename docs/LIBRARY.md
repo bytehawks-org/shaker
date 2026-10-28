@@ -117,6 +117,9 @@ indexed by canonical name, with `ROSETTA_ORDER` keeping declaration order.
 `seal_check_files <bundle>` (honours `SPEC_MUTABLE`), `seal_require_trust <bundle>`, `seal_check_platform_install`; each prints one line and
 returns a code (0 ok, 1 problem, 2 nothing to check, 3 signed but nothing pinned). `artifact_restore <tar.gz> [--sidecar=] [--force] [--require-signature]`.
 
+## up.libsh
+`up_plan <pkg>` (fills `UP_ORDER`, dependencies first; checks recipes and cycles), `up_apply <pkg> <main|dep> [opts]`, `up_all <pkg> [opts]`.
+
 ## shaker.libsh
 `cleanup_bh_shaker_env_vars` (unset every exported `BH_SHAKER_*`; internal paths are unexported so
 Shaker keeps working), `debug_bh_shaker_env_vars` (secrets masked), `print_welcome_banner` (stderr).

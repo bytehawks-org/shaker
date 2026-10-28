@@ -55,6 +55,21 @@ Resolves parameters, then `pre_init` hooks → persistence → templates → `fi
 Sends the package's stop signal (`stopsignal`, e.g. `QUIT` for nginx) to the PID file process, waits
 `BH_SHAKER_STOP_TIMEOUT` (30 s) then `SIGKILL`. Removes the PID file. No PID file → success.
 
+### `shaker up <pkg> [params] [--plan] [--run]`
+Brings a package and everything it was built against up, **dependencies first**. The dependencies come from `BH_PKG_DEPENDS` in the
+bundle's `manifest.env` (`<package>=<recipe sha256>`, written by Distillery; a bundle without it has none), each dependency's own bundle
+lists its dependencies in turn. Before anything is done it checks that the installed bundle of every dependency is the build recorded
+(a different recipe stops the run: rebuild or reinstall one of them), and that there is no cycle. Then, for every unit in order, it runs
+`install` and `init`; a unit whose bundle declares no runtime (a library) is skipped. Parameters, `--config` and `--bundle` apply to
+`<pkg>` only, dependencies use their defaults and the environment. The first failure stops the chain. `--plan` prints the order and
+changes nothing; `--run` starts `<pkg>` afterwards (as `shaker run`). Idempotent.
+
+```
+$ shaker up nifi --plan
+temurin
+nifi
+```
+
 ### `shaker restore <artifact.tar.gz> [--sidecar=FILE] [--force] [--require-signature]`
 Unpacks a Distillery artifact into `BH_ROOT` without Distillery. `<name>.json` (and `<name>.json.asc` if present) must sit next to the
 tarball, or be given with `--sidecar`. Nothing is written before all of these pass: the tarball matches the sha256 recorded in the
