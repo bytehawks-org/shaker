@@ -30,6 +30,15 @@
 | `BH_SHAKER_HOOKS_CONTINUE` | `false` | keep going after a failing hook |
 | `BH_SHAKER_STOP_TIMEOUT` | `30` | seconds before `stop` sends `SIGKILL` |
 
+## Trust (optional; see [SECURITY](SECURITY.md#sealed-bundles-and-artifacts))
+
+| Variable | Meaning |
+|---|---|
+| `BH_SHAKER_TRUSTED_FINGERPRINTS` | full 40-hex **primary** fingerprints of accepted signers, comma or space separated |
+| `BH_SHAKER_TRUSTED_KEYS` | file with their public keys; default: exported from the local gpg keyring |
+| `BH_SHAKER_REQUIRE_SIGNATURE` | `true`: `install`, `verify` and `restore` fail unless the bundle/artifact is signed by a pinned signer |
+| `BH_SHAKER_ALLOW_PLATFORM_MISMATCH` | `true`: only warn when the build is for another architecture or C library |
+
 ## Set by Shaker
 
 | Variable | Set by | Content |

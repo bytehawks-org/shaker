@@ -22,6 +22,7 @@ package:
         mkdir -p {{ prefix }}/bin
         cp demo.sh {{ prefix }}/bin/demo
     runtime:
+      mutable: ["{{ prefix }}/conf"]
       dirs:
         - {path: "{{ prefix }}/conf", mode: "0750"}
       templates:
@@ -34,7 +35,7 @@ package:
 YAML
     root="${t}/root"
     python3 "${DISTILLERY_HOME}/scripts/autobuilder.py" build --package demo --root "${root}" \
-        --packages "${t}/packages.yaml" --assets "${t}/assets" >/dev/null 2>&1
+        --packages "${t}/packages.yaml" --assets "${t}/assets" --artifacts-dir "${t}/dist" >/dev/null 2>&1
     assert_ok "integration: distillery wrote the bundle" test -f "${root}/demo/.bytehawks/runtime.spec"
 
     export BH_ROOT="${root}" BH_SHAKER_ALLOW_NONROOT=true BH_SHAKER_LOG_LEVEL=warn
@@ -43,6 +44,24 @@ YAML
     assert_eq $'port=7100\nprefix='"${root}/demo" "$(cat "${root}/demo/conf/demo.conf")" "integration: alias env reaches the template"
     assert_eq "demo says yo" "$("${SHAKER_BIN}" run demo --greeting=yo 2>/dev/null)" "integration: run executes the built artifact"
     DEMO_PORT=7100 "${SHAKER_BIN}" verify demo --no-health >/dev/null 2>&1 && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: integration verify"; }
+
+    # what Distillery seals, Shaker checks
+    assert_ok "integration: bundle is sealed" test -f "${root}/demo/.bytehawks/bundle.sha256"
+    assert_contains "BH_PKG_LIBC=" "$(cat "${root}/demo/.bytehawks/manifest.env")" "integration: manifest.env records the platform"
+    assert_contains "mutable|${root}/demo/conf" "$(cat "${root}/demo/.bytehawks/runtime.spec")" "integration: runtime.spec lists the mutable paths"
+    verify_out="$(DEMO_PORT=7100 "${SHAKER_BIN}" verify demo --files --no-health 2>&1)" && verify_rc=0 || verify_rc=$?
+    assert_eq "0" "${verify_rc}" "integration: verify --files passes on a fresh install (rendered conf/ is mutable)"
+    assert_contains "bundle digest" "${verify_out}" "integration: verify reports the bundle digest"
+    assert_contains "mutable skipped" "${verify_out}" "integration: verify --files reports what it skipped"
+    echo tampered >> "${root}/demo/bin/demo"
+    assert_fail "integration: verify --files catches a modified binary" env DEMO_PORT=7100 "${SHAKER_BIN}" verify demo --files --no-health
+    # an artifact Distillery packed is restored by Shaker alone
+    artifact="$(ls "${t}"/dist/*.tar.gz)"
+    rm -rf "${root}/demo"
+    assert_ok "integration: shaker restore unpacks the Distillery artifact" "${SHAKER_BIN}" restore "${artifact}"
+    "${SHAKER_BIN}" install demo >/dev/null 2>&1
+    DEMO_PORT=7100 "${SHAKER_BIN}" init demo >/dev/null 2>&1
+    DEMO_PORT=7100 "${SHAKER_BIN}" verify demo --files --no-health >/dev/null 2>&1 && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: integration verify after restore"; }
     unset BH_ROOT BH_SHAKER_ALLOW_NONROOT BH_SHAKER_LOG_LEVEL
 else
     echo "  (skipped: no Distillery checkout or PyYAML)"

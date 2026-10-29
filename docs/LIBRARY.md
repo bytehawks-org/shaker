@@ -112,6 +112,14 @@ indexed by canonical name, with `ROSETTA_ORDER` keeping declaration order.
 `state_now`; `shaker_find_bundle <pkg>`, `spec_load <bundle>` (fills `SPEC_*`, exports `BH_PKG_*`);
 `lifecycle_parse_args`, `lifecycle_load`, `lifecycle_resolve`, `lifecycle_install|init|run|stop|verify|status|unit`.
 
+## seal.libsh · artifact.libsh
+`seal_check_platform [arch libc]`, `seal_check_digest <bundle>`, `seal_check_signature <bundle>`, `seal_verify_gpg <file> <sig> <fingerprint...>`,
+`seal_check_files <bundle>` (honours `SPEC_MUTABLE`), `seal_require_trust <bundle>`, `seal_check_platform_install`; each prints one line and
+returns a code (0 ok, 1 problem, 2 nothing to check, 3 signed but nothing pinned). `artifact_restore <tar.gz> [--sidecar=] [--force] [--require-signature]`.
+
+## up.libsh
+`up_plan <pkg>` (fills `UP_ORDER`, dependencies first; checks recipes and cycles), `up_apply <pkg> <main|dep> [opts]`, `up_all <pkg> [opts]`.
+
 ## shaker.libsh
 `cleanup_bh_shaker_env_vars` (unset every exported `BH_SHAKER_*`; internal paths are unexported so
 Shaker keeps working), `debug_bh_shaker_env_vars` (secrets masked), `print_welcome_banner` (stderr).

@@ -39,7 +39,7 @@ lifecycle_parse_args() {
 
     LC_PKG="${1:?package required}"; shift
     LC_CONFIG=""; LC_NO_INIT="false"; LC_DAEMON="false"; LC_STRICT="false"; LC_NO_HEALTH="false"
-    LC_REINIT="false"; LC_FORMAT="export"; LC_VALIDATE_ONLY="false"; LC_HELP_VARS="false"
+    LC_REINIT="false"; LC_FORMAT="export"; LC_VALIDATE_ONLY="false"; LC_HELP_VARS="false"; LC_FILES="false"
     LC_CLI=(); LC_EXTRA=(); LC_PASSTHROUGH=(); LC_MAP_OVERRIDE=""
 
     local arg
@@ -57,6 +57,8 @@ lifecycle_parse_args() {
             --strict)      LC_STRICT="true" ;;
             --no-health)   LC_NO_HEALTH="true" ;;
             --reinit)      LC_REINIT="true" ;;
+            --files)       LC_FILES="true" ;;
+            --require-signature) export BH_SHAKER_REQUIRE_SIGNATURE="true" ;;
             --)            LC_EXTRA=("$@"); break ;;
             *)             LC_CLI+=("${arg}"); LC_PASSTHROUGH+=("${arg}") ;;
         esac
@@ -180,6 +182,10 @@ lifecycle_install() {
         log_event "error" "install requires root (set BH_SHAKER_ALLOW_NONROOT=true to skip ownership changes)"
         return 1
     fi
+
+    # what is about to be installed must be what Distillery sealed, for this platform, from a trusted signer when required
+    seal_check_platform_install || return 1
+    seal_require_trust "${SPEC_BUNDLE}" || return 1
 
     log_event "info" "Installing ${LC_PKG} ${BH_PKG_VERSION:-}"
 
@@ -531,10 +537,42 @@ _mode_satisfies() {
 lifecycle_verify() {
 
     local entry path mode owner tool dest src tpl_mode index=0 want actual tmp
-    local modestr uid gid host port
+    local modestr uid gid host port out rc
 
     LC_OK=0; LC_WARN=0; LC_FAIL=0
     _check OK "bundle" "${SPEC_BUNDLE} (${BH_PKG_NAME:-?} ${BH_PKG_VERSION:-?})"
+
+    out="$(seal_check_platform)" && rc=0 || rc=$?
+    case "${rc}" in
+        0) _check OK "platform" "${out}" ;;
+        1) if is_boolean_yes "${BH_SHAKER_ALLOW_PLATFORM_MISMATCH:-false}"; then _check WARN "platform" "${out}"
+           else _check FAIL "platform" "${out}"; fi ;;
+    esac
+
+    out="$(seal_check_digest "${SPEC_BUNDLE}")" && rc=0 || rc=$?
+    case "${rc}" in
+        0) _check OK "bundle digest" "${out}" ;;
+        1) _check FAIL "bundle digest" "${out}" ;;
+        2) ! is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}" || _check FAIL "bundle digest" "${out}" ;;
+    esac
+
+    out="$(seal_check_signature "${SPEC_BUNDLE}")" && rc=0 || rc=$?
+    case "${rc}" in
+        0) _check OK "bundle signature" "signed by ${out}" ;;
+        1) _check FAIL "bundle signature" "${out}" ;;
+        2) ! is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}" || _check FAIL "bundle signature" "${out}" ;;
+        3) if is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}"; then _check FAIL "bundle signature" "${out}"
+           else _check WARN "bundle signature" "${out}"; fi ;;
+    esac
+
+    if is_boolean_yes "${LC_FILES}"; then
+        out="$(seal_check_files "${SPEC_BUNDLE}")" && rc=0 || rc=$?
+        case "${rc}" in
+            0) _check OK "installed files" "${out}" ;;
+            1) _check FAIL "installed files" "$(head -n 1 <<< "${out}")"; tail -n +2 <<< "${out}" | sed 's/^/         /' ;;
+            2) _check WARN "installed files" "${out}" ;;
+        esac
+    fi
 
     for tool in "${SPEC_REQUIRES[@]+"${SPEC_REQUIRES[@]}"}"; do
         if command -v "${tool}" >/dev/null 2>&1 || [[ -x "${BH_PKG_PREFIX:-/nonexistent}/bin/${tool}" ]] \

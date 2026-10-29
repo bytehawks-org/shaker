@@ -15,6 +15,7 @@ SPEC_DIRS=(); SPEC_PERSIST=(); SPEC_TEMPLATES=(); SPEC_REQUIRES=()
 SPEC_RUN=(); SPEC_STOPSIGNAL="TERM"; SPEC_PIDFILE=""
 SPEC_HEALTH_KIND=""; SPEC_HEALTH=()
 declare -gA SPEC_HOOKS=()
+SPEC_MUTABLE=()
 
 
 ##############################################################################
@@ -58,7 +59,7 @@ spec_reset() {
 
     SPEC_BUNDLE=""
     SPEC_USER_NAME=""; SPEC_USER_UID=""; SPEC_USER_GID=""; SPEC_USER_HOME=""
-    SPEC_DIRS=(); SPEC_PERSIST=(); SPEC_TEMPLATES=(); SPEC_REQUIRES=()
+    SPEC_DIRS=(); SPEC_PERSIST=(); SPEC_TEMPLATES=(); SPEC_REQUIRES=(); SPEC_MUTABLE=()
     SPEC_RUN=(); SPEC_STOPSIGNAL="TERM"; SPEC_PIDFILE=""
     SPEC_HEALTH_KIND=""; SPEC_HEALTH=()
     SPEC_HOOKS=()
@@ -110,6 +111,7 @@ spec_load() {
             stopsignal) SPEC_STOPSIGNAL="${fields[1]:-TERM}" ;;
             pidfile)    SPEC_PIDFILE="${fields[1]:-}" ;;
             requires)   SPEC_REQUIRES+=("${fields[1]}") ;;
+            mutable)    SPEC_MUTABLE+=("${fields[1]}") ;;
             health)     SPEC_HEALTH_KIND="${fields[1]}"; SPEC_HEALTH=("${fields[@]:2}") ;;
             *)          log_event "warn" "runtime.spec: unknown record '${fields[0]}' ignored" ;;
         esac

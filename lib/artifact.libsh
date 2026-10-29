@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+#
+# artifact.libsh - install a Distillery artifact without Distillery.
+#
+# An artifact is <name>.tar.gz (the files a build installed, relative to the root) plus <name>.json (sha256 of the
+# tarball, platform, root, recipe) and optionally <name>.json.asc (OpenPGP signature of the .json). `shaker restore`
+# checks all of that before a single file is written, so a host that only has Shaker (a container image, an air-gapped
+# VM) can consume what a pipeline produced. It is the counterpart of `autobuilder.py restore`.
+
+
+# _artifact_field <sidecar> <key>: a top-level string value of the sidecar written by Distillery (one key per line)
+_artifact_field() {
+
+    sed -n "s/^  \"${2}\": \"\\(.*\\)\",\\{0,1\\}\$/\\1/p" "${1}" | head -n 1
+
+}
+
+
+# _artifact_member_ok <name>: relative, no parent traversal
+_artifact_member_ok() {
+
+    local name="${1}"
+    case "${name}" in
+        ""|/*|..|../*|*/..|*/../*) return 1 ;;
+    esac
+
+}
+
+
+# _artifact_stays_inside <directory of the link, relative to the tree> <link target>
+# Lexical resolution (no readlink -m: BusyBox has none): 0 when the target stays inside the tree.
+_artifact_stays_inside() {
+
+    local -a parts out=()
+    local part
+    IFS='/' read -ra parts <<< "${1}/${2}"
+    for part in "${parts[@]}"; do
+        case "${part}" in
+            ""|.) ;;
+            ..)   (( ${#out[@]} > 0 )) || return 1; out=("${out[@]:0:${#out[@]}-1}") ;;
+            *)    out+=("${part}") ;;
+        esac
+    done
+
+}
+
+
+##############################################################################
+#
+# Function: artifact_restore
+#
+# Usage: artifact_restore <artifact.tar.gz> [--sidecar=FILE] [--force] [--require-signature]
+#
+# Order of the checks (nothing is written before all pass):
+#   1. sidecar present, sha256 of the tarball equals the recorded one
+#   2. signature of the sidecar by a pinned signer (always when present; required with --require-signature)
+#   3. platform (arch, libc) and root of the build equal this host / BH_ROOT (paths are baked into the files)
+#   4. member names are relative and stay inside the tree, no escaping links
+# then it extracts into a staging directory next to the root, re-validates the links, and moves the tree in.
+#
+# Returns 0 on success (or when the same recipe is already installed), 1 otherwise.
+#
+##############################################################################
+artifact_restore() {
+
+    local tarball="${1:?artifact required}"; shift
+    local sidecar="" force="false" arg
+    for arg in "$@"; do
+        case "${arg}" in
+            --sidecar=*)         sidecar="${arg#--sidecar=}" ;;
+            --force)             force="true" ;;
+            --require-signature) export BH_SHAKER_REQUIRE_SIGNATURE="true" ;;
+            *) log_event "error" "restore: unknown option '${arg}'"; return 1 ;;
+        esac
+    done
+
+    [[ -r "${tarball}" ]] || { log_event "error" "restore: cannot read ${tarball}"; return 1; }
+    sidecar="${sidecar:-${tarball%.tar.gz}.json}"
+    [[ -r "${sidecar}" ]] || { log_event "error" "restore: sidecar ${sidecar} not found"; return 1; }
+
+    local name package tag version recipe sha root prefix arch libc out rc signature_file
+    package="$(_artifact_field "${sidecar}" package)"; tag="$(_artifact_field "${sidecar}" tag)"
+    version="$(_artifact_field "${sidecar}" version)"; recipe="$(_artifact_field "${sidecar}" recipe_sha256)"
+    sha="$(_artifact_field "${sidecar}" sha256)"; root="$(_artifact_field "${sidecar}" root)"
+    prefix="$(_artifact_field "${sidecar}" prefix)"; arch="$(_artifact_field "${sidecar}" arch)"
+    libc="$(_artifact_field "${sidecar}" libc)"; name="$(_artifact_field "${sidecar}" name)"
+    [[ -n "${package}" && -n "${sha}" && -n "${root}" && -n "${prefix}" ]] \
+        || { log_event "error" "restore: ${sidecar} is not a Distillery artifact sidecar"; return 1; }
+
+    # 1. integrity
+    if [[ "$(sha256_of_file "${tarball}")" != "${sha}" ]]; then
+        log_event "error" "restore: ${tarball} does not match the sha256 recorded in ${sidecar}"
+        return 1
+    fi
+
+    # 2. authenticity of the sidecar (and through it of the tarball hash and the recipe)
+    signature_file="${sidecar}.asc"
+    local -a fingerprints
+    local list="${BH_SHAKER_TRUSTED_FINGERPRINTS:-}"
+    list="${list//,/ }"; read -ra fingerprints <<< "${list}"
+    if [[ -r "${signature_file}" ]]; then
+        if (( ${#fingerprints[@]} == 0 )); then
+            if is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}"; then
+                log_event "error" "restore: signed artifact but BH_SHAKER_TRUSTED_FINGERPRINTS is empty"; return 1
+            fi
+            log_event "warn" "restore: ${name} is signed but no trusted fingerprint is configured: signature not checked"
+        else
+            out="$(seal_verify_gpg "${sidecar}" "${signature_file}" "${fingerprints[@]}")" \
+                || { log_event "error" "restore: ${out}"; return 1; }
+            log_event "info" "Signature ok: signed by ${out}"
+        fi
+    elif is_boolean_yes "${BH_SHAKER_REQUIRE_SIGNATURE:-false}"; then
+        log_event "error" "restore: ${name} is not signed (BH_SHAKER_REQUIRE_SIGNATURE)"
+        return 1
+    fi
+
+    # 3. platform and root
+    out="$(seal_check_platform "${arch}" "${libc}")" && rc=0 || rc=$?
+    if (( rc == 1 )) && ! is_boolean_yes "${BH_SHAKER_ALLOW_PLATFORM_MISMATCH:-false}"; then
+        log_event "error" "restore: ${package}: ${out}"; return 1
+    fi
+    if [[ "${root%/}" != "${BH_ROOT%/}" ]]; then
+        log_event "error" "restore: built for root ${root}, this host uses ${BH_ROOT} (BH_ROOT): the files contain absolute paths"
+        return 1
+    fi
+
+    # already there?
+    local installed_bundle="${prefix}/.bytehawks"
+    [[ "${tag}" == "library" ]] && installed_bundle="${prefix}/.bytehawks/${package}"
+    if ! is_boolean_yes "${force}" && [[ -r "${installed_bundle}/manifest.env" ]] \
+       && grep -q "^BH_PKG_RECIPE=${recipe}$" "${installed_bundle}/manifest.env"; then
+        log_event "info" "restore: ${package} ${version} (${recipe:0:12}) is already installed"
+        return 0
+    fi
+
+    # 4. members
+    local member listing
+    while IFS= read -r member; do
+        _artifact_member_ok "${member}" || { log_event "error" "restore: unsafe path in archive: ${member}"; return 1; }
+    done < <(tar -tzf "${tarball}")
+    listing="$(tar -tvzf "${tarball}")" || { log_event "error" "restore: cannot read ${tarball}"; return 1; }
+    if grep -E '^h.* link to (/|.*\.\.)' <<< "${listing}" >/dev/null; then
+        log_event "error" "restore: archive contains a hard link that leaves the tree"; return 1
+    fi
+
+    # a member must not be written *through* a symlink the archive creates (link -> ../.., then link/file)
+    local line name symlink
+    local -a symlinks=()
+    while IFS= read -r line; do
+        [[ "${line}" == l* ]] || continue
+        name="$(sed -E 's/^l[^ ]+ +[^ ]+ +[0-9]+ +[0-9-]+ +[0-9:]+ +(.*) -> .*$/\1/' <<< "${line}")"
+        [[ -n "${name}" && "${name}" != "${line}" ]] && symlinks+=("${name%/}")
+    done <<< "${listing}"
+    if (( ${#symlinks[@]} > 0 )); then
+        while IFS= read -r member; do
+            for symlink in "${symlinks[@]}"; do
+                if [[ "${member}" == "${symlink}/"* ]]; then
+                    log_event "error" "restore: ${member} would be written through the link ${symlink}"; return 1
+                fi
+            done
+        done < <(tar -tzf "${tarball}")
+    fi
+
+    local stage link target
+    mkdir -p "${BH_ROOT}" || return 1
+    stage="$(mktemp -d "${BH_ROOT%/}/.restore.XXXXXX")" || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '${stage}'" RETURN
+
+    tar -xzf "${tarball}" -C "${stage}" --no-same-owner || { log_event "error" "restore: extraction failed"; return 1; }
+
+    while IFS= read -r -d '' link; do
+        target="$(readlink "${link}")"
+        case "${target}" in /*) log_event "error" "restore: absolute link ${link#"${stage}"/} -> ${target}"; return 1 ;; esac
+        _artifact_stays_inside "$(dirname "${link#"${stage}"/}")" "${target}" \
+            || { log_event "error" "restore: link ${link#"${stage}"/} -> ${target} leaves the tree"; return 1; }
+    done < <(find "${stage}" -type l -print0)
+
+    cp -a "${stage}/." "${BH_ROOT}/" || { log_event "error" "restore: cannot copy into ${BH_ROOT}"; return 1; }
+
+    # the restored bundle must be the sealed one
+    if [[ -r "${installed_bundle}/bundle.sha256" ]]; then
+        out="$(seal_check_digest "${installed_bundle}")" && rc=0 || rc=$?
+        if (( rc == 1 )); then log_event "error" "restore: restored bundle: ${out}"; return 1; fi
+    fi
+
+    log_event "info" "Restored ${package} ${version} (${recipe:0:12}) into ${BH_ROOT}; next: shaker install ${package}"
+
+}

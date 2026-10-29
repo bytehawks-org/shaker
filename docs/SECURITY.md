@@ -55,3 +55,20 @@ Out of scope / user responsibility:
 ## Reporting
 
 Open a private security advisory on the GitHub repository.
+
+## Sealed bundles and artifacts
+
+Distillery writes `bundle.sha256` (hashes of the bundle files and of `files.sha256`, which lists every installed file) and, when a
+key is configured, its OpenPGP signature; artifacts have a signed sidecar. Shaker checks them with `install`, `verify [--files]` and
+`restore`, so a host with no Distillery can prove that what it runs is what the pipeline built.
+
+* **Trust lives in the consumer.** Accepted signers are the fingerprints in `BH_SHAKER_TRUSTED_FINGERPRINTS` (full primary
+  fingerprints, never key ids), never data read from the bundle. A valid signature by an unpinned key is refused. Keys come from
+  `BH_SHAKER_TRUSTED_KEYS` or the local keyring and are imported into a throw-away keyring for each check.
+* **Nothing is written before the checks pass** in `restore`: sha256, signature, platform, root, member names; links are re-checked
+  after extraction into a staging directory. Absolute links, links leaving the tree and `..` members are refused.
+* **`mutable` paths are not checked** by `verify --files` by design; they are declared by the package author in the (signed) bundle,
+  so review that list when you review a package.
+* **Without a pinned signer the signature is not evaluated** (a WARN, or a failure with `--require-signature`); the digest still
+  catches accidental modification, not a deliberate one made together with the digest. Pin a signer for that.
+* A signed bundle proves origin and integrity, not that the software is free of vulnerabilities.
