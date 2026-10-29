@@ -14,6 +14,8 @@ _up_bundle_make() {  # <pkg> <recipe> <deps "a=r b=r"> [runtime.spec line...]
 
 t="$(new_tmp)"; export BH_ROOT="${t}/root" BH_DEPS="${t}/root/deps" BH_ETC="${t}/root/etc" BH_VAR="${t}/root/var" BH_STATE="${t}/state"
 export BH_SHAKER_ALLOW_NONROOT=true BH_SHAKER_QUIET=true
+# hand-written bundles record no platform: do not inherit one from the environment (glibc build vs musl host)
+unset BH_PKG_ARCH BH_PKG_LIBC
 r_lib="$(printf 'a%.0s' {1..64})"; r_mid="$(printf 'b%.0s' {1..64})"; r_app="$(printf 'c%.0s' {1..64})"
 
 _up_bundle_make lib "${r_lib}" ""
