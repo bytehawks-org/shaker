@@ -115,7 +115,10 @@ ensure_group_exists() {
     getent group "${name}" >/dev/null 2>&1 && return 0
 
     if command -v groupadd >/dev/null 2>&1; then
-        groupadd $([[ -z "${gid}" || "${gid}" -lt 1000 ]] && echo -r) ${gid:+-g "${gid}"} "${name}"
+        local -a options=()
+        [[ -z "${gid}" || "${gid}" -lt 1000 ]] && options+=(-r)
+        [[ -n "${gid}" ]] && options+=(-g "${gid}")
+        groupadd "${options[@]+"${options[@]}"}" "${name}"
     else
         addgroup -S ${gid:+-g "${gid}"} "${name}"
     fi
