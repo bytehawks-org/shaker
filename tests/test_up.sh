@@ -48,7 +48,8 @@ assert_eq "1" "${rc}" "up: dependency cycle is refused"
 assert_contains "cycle" "${out}" "up: cycle is named"
 
 # set-up: the library has no runtime and is skipped, the others get their directories
-assert_ok "up: whole chain" up_all app
+out="$(BH_SHAKER_QUIET=false up_all app 2>&1)" && rc=0 || rc=$?
+assert_eq "0" "${rc}" "up: whole chain (${out//$'\n'/ | })"
 assert_ok "up: dependency with a runtime was set up" test -d "${BH_ROOT}/mid/data"
 assert_ok "up: the package itself was set up" test -d "${BH_ROOT}/app/data"
 assert_eq "750" "$(stat -c %a "${BH_ROOT}/mid/data")" "up: directory mode applied"

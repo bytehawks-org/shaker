@@ -16,7 +16,8 @@ assert_ok "is_dir_empty on empty" is_dir_empty "${t}/none"
 assert_eq "32" "$(generate_random_string 32 | tr -d '\n' | wc -c | tr -d ' ')" "random string length"
 
 # arbitrary uid: writable passwd gets an entry (needs root + setpriv to simulate another uid)
-if am_i_root && command -v setpriv >/dev/null 2>&1; then
+if am_i_root && command -v setpriv >/dev/null 2>&1 \
+   && setpriv --reuid=54321 --regid=0 --clear-groups test -r "${TESTS_DIR}/../lib/shaker.libsh" 2>/dev/null; then
     : > "${t}/passwd"; : > "${t}/group"; chmod 666 "${t}/passwd" "${t}/group"
     setpriv --reuid=54321 --regid=0 --clear-groups env SHAKER_PASSWD_FILE="${t}/passwd" SHAKER_GROUP_FILE="${t}/group" \
         bash -c ". '${TESTS_DIR}/../lib/shaker.libsh'; ensure_passwd_entry svc /tmp" >/dev/null 2>&1

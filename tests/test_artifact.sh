@@ -66,13 +66,21 @@ n="bh--demo--stable--application--amd64--1.0--000000000000"; mkdir -p "${t}/c"
 _artifact_make "${t}/c" "${n}"; _artifact_sidecar "${t}/c" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}" "/somewhere/else"
 assert_fail "restore: artifact built for another root" artifact_restore "${t}/c/${n}.tar.gz"
 
+# Two fixtures need GNU tar to be crafted (--transform to write "../x", -r to append behind a symlink); BusyBox cannot build
+# them, so they are skipped there. `restore` itself must work with whatever tar the host has.
+_gnu_tar() { tar --version 2>/dev/null | grep -q 'GNU tar'; }
+
 # hostile archives (the sha256 matches: the archive itself is the attack)
 mkdir -p "${t}/h" "${t}/h/src/demo"
 n="bh--demo--stable--application--amd64--1.0--111111111111"
 printf 'x' > "${t}/h/src/demo/f"
-tar -czf "${t}/h/${n}.tar.gz" --transform 's,^,../,' -C "${t}/h/src" demo
-_artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
-assert_fail "restore: member with .. is refused" artifact_restore "${t}/h/${n}.tar.gz"
+if _gnu_tar; then
+    tar -czf "${t}/h/${n}.tar.gz" --transform 's,^,../,' -C "${t}/h/src" demo
+    _artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
+    assert_fail "restore: member with .. is refused" artifact_restore "${t}/h/${n}.tar.gz"
+else
+    echo "  (skipped: a '..' member needs GNU tar to craft)"
+fi
 
 n="bh--demo--stable--application--amd64--1.0--222222222222"
 rm -rf "${t}/h/src"; mkdir -p "${t}/h/src/demo"; ln -s ../../../../etc/passwd "${t}/h/src/demo/escape"
@@ -89,13 +97,17 @@ assert_fail "restore: absolute symlink is refused" artifact_restore "${t}/h/${n}
 assert_fail "restore: neither is anything of it installed" test -e "${BH_ROOT}/demo/abs"
 
 n="bh--demo--stable--application--amd64--1.0--444444444444"
-rm -rf "${t}/h/src" "${t}/h/src2"; mkdir -p "${t}/h/src/demo" "${t}/h/src2/demo/l"
-ln -s ../../../../tmp "${t}/h/src/demo/l"; printf 'x' > "${t}/h/src2/demo/l/evil"
-tar -cf "${t}/h/${n}.tar" -C "${t}/h/src" demo/l; tar -rf "${t}/h/${n}.tar" -C "${t}/h/src2" demo/l/evil
-gzip -f "${t}/h/${n}.tar"; mv "${t}/h/${n}.tar.gz" "${t}/h/${n}.tar.gz"
-_artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
-assert_fail "restore: member written through an archive symlink is refused" artifact_restore "${t}/h/${n}.tar.gz"
-assert_fail "restore: ... and nothing was written outside" test -e /tmp/evil
+if _gnu_tar; then
+    rm -rf "${t}/h/src" "${t}/h/src2"; mkdir -p "${t}/h/src/demo" "${t}/h/src2/demo/l"
+    ln -s ../../../../tmp "${t}/h/src/demo/l"; printf 'x' > "${t}/h/src2/demo/l/evil"
+    tar -cf "${t}/h/${n}.tar" -C "${t}/h/src" demo/l; tar -rf "${t}/h/${n}.tar" -C "${t}/h/src2" demo/l/evil
+    gzip -f "${t}/h/${n}.tar"
+    _artifact_sidecar "${t}/h" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
+    assert_fail "restore: member written through an archive symlink is refused" artifact_restore "${t}/h/${n}.tar.gz"
+    assert_fail "restore: ... and nothing was written outside" test -e /tmp/evil
+else
+    echo "  (skipped: a member behind a symlink needs GNU tar to craft)"
+fi
 
 assert_ok "inside: sibling link" _artifact_stays_inside "demo/bin" "tool"
 assert_ok "inside: up one level, still inside" _artifact_stays_inside "demo/bin" "../lib/x.so"
