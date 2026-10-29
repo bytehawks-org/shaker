@@ -18,7 +18,7 @@ root-only checks (arbitrary uid with `setpriv`) are skipped otherwise, and lifec
 | `test_validate.sh` | booleans, case, ports, enums, secret-name detection |
 | `test_os.sh` | os-release fixtures for 7 distributions → family; container / VM / physical / Kubernetes markers with `systemd-detect-virt` hidden |
 | `test_pkg.sh` | command construction for every package manager, logical name mapping, dry-run |
-| `test_file.sh` | literal replace, `ensure_line_in_file`, `render_template` (defaults, verbatim values, no evaluation, missing variable), `wait_for_port` |
+| `test_file.sh` | literal replace, `ensure_line_in_file`, `render_template` (defaults, verbatim values, no evaluation, missing variable, conditional `{{? NAME }}` lines), `wait_for_port` |
 | `test_rosetta.sh` | precedence, aliases, native twins, `_FILE`, conflicts, validation, env/ini/json/yaml/drop-ins, provenance masking, end-to-end `exec` |
 | `test_state.sh` | state get/set/unset, events, fallback dir, `expand_vars`, SHA-256, PID helpers |
 | `test_fs.sh` | mode helpers, recursive permissions, arbitrary uid, bootstrap |
