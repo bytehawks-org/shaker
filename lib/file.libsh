@@ -56,7 +56,9 @@ ensure_line_in_file() {
 # Function: render_template
 #
 # Renders a template replacing {{ NAME }} and {{ NAME:-default }} with the
-# value of the environment variable NAME. Values are inserted verbatim (no
+# value of the environment variable NAME. A line starting with {{? NAME }} is
+# kept only when NAME is set and not empty (the marker is removed): optional
+# settings need no empty "key " line that would break the application. Values are inserted verbatim (no
 # escaping, no evaluation). A variable that is unset and has no default is an
 # error, so a broken configuration never silently reaches the application.
 #
@@ -72,11 +74,18 @@ render_template() {
     local template="${1:?template required}" dest="${2:-}"
     local line out="" missing=0 name def
     local re='\{\{[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?[[:space:]]*\}\}'
+    local cond='^([[:space:]]*)\{\{\?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\}\}(.*)$'
 
     [[ -r "${template}" ]] || { log_event "error" "Template not readable: ${template}"; return 1; }
 
     while IFS= read -r line || [[ -n "${line}" ]]; do
         local rendered=""
+        # `{{? NAME }}rest of the line`: the line exists only when NAME is set and not empty (optional settings)
+        if [[ "${line}" =~ ${cond} ]]; then
+            name="${BASH_REMATCH[2]}"
+            [[ -n "${!name:-}" ]] || continue
+            line="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
+        fi
         while [[ "${line}" =~ ${re} ]]; do
             name="${BASH_REMATCH[1]}"
             def="${BASH_REMATCH[3]}"

@@ -11,5 +11,16 @@ out="$(P=80 X='$(id)' H='h&\1' render_template "${t}/tpl")"
 assert_contains 'host=h&\1' "${out}" "values inserted verbatim"
 assert_contains 'raw=$(id) and 80' "${out}" "no evaluation"
 assert_fail "missing var" env -u P bash -c ". ${TESTS_DIR}/../lib/shaker.libsh; render_template ${t}/tpl"
+# conditional lines: {{? NAME }} keeps the line only when NAME is set and not empty
+printf 'always=1\n{{? PW }}requirepass {{ PW }}\n  {{?LOG}}logfile "{{ LOG:-x }}"\nlast=1\n' > "${t}/cond"
+out="$(env -u PW -u LOG bash -c ". ${TESTS_DIR}/../lib/shaker.libsh; render_template ${t}/cond")"
+assert_eq $'always=1\nlast=1' "${out%$'\n'}" "conditional lines: unset variables drop their lines"
+out="$(PW= LOG= render_template "${t}/cond")"
+assert_eq $'always=1\nlast=1' "${out%$'\n'}" "conditional lines: empty variables drop their lines too"
+out="$(PW='s3 cret' LOG=/var/log/x.log render_template "${t}/cond")"
+assert_eq $'always=1\nrequirepass s3 cret\n  logfile "/var/log/x.log"\nlast=1' "${out%$'\n'}" "conditional lines: set variables keep the line, indentation preserved"
+printf '{{? PW }}a={{ MISSING }}\n' > "${t}/cond2"
+assert_ok "conditional lines: a variable inside a dropped line is not required" env -u PW -u MISSING bash -c ". ${TESTS_DIR}/../lib/shaker.libsh; render_template ${t}/cond2"
+assert_fail "conditional lines: ... but is required when the line is kept" env PW=1 -u MISSING bash -c ". ${TESTS_DIR}/../lib/shaker.libsh; render_template ${t}/cond2"
 is_dir_empty "${t}/nonexistent" && PASS=$((PASS+1))
 wait_for_port 127.0.0.1 1 1 2>/dev/null && FAIL=$((FAIL+1)) || PASS=$((PASS+1))

@@ -85,7 +85,7 @@ root, non-interactively, or only prints it under `BH_SHAKER_DRY_RUN=true`.
 |---|---|
 | `replace_in_file <file> <old> <new>` | **literal** replacement, in place, any characters safe |
 | `ensure_line_in_file <file> <line>` | append if no identical line |
-| `render_template <tpl> [dest]` | `{{ NAME }}`, `{{ NAME:-default }}` from the environment; error if unset without default |
+| `render_template <tpl> [dest]` | `{{ NAME }}`, `{{ NAME:-default }}` from the environment; error if unset without default. A line beginning `{{? NAME }}` is emitted only when `NAME` is set and non-empty (optional settings), e.g. `{{? BH_APP_PASSWORD }}requirepass {{ BH_APP_PASSWORD }}` |
 | `expand_vars <string>` | `${NAME}`, `${NAME:-default}`; never evaluates; error if unset without default |
 | `sha256_of_file` / `sha256_of_string` | `sha256sum`, `shasum -a 256` or `openssl dgst` |
 
