@@ -3,6 +3,24 @@
 All notable changes to Shaker. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/) (pre-1.0: minor versions may break).
 
+## [Unreleased]
+
+### Added
+- **Bundle seal and platform check.** `install` and `verify` compare `BH_PKG_ARCH`/`BH_PKG_LIBC` with the host, check `bundle.sha256` and the
+  detached signature `bundle.sha256.asc` against pinned primary fingerprints (`BH_SHAKER_TRUSTED_FINGERPRINTS`, `BH_SHAKER_TRUSTED_KEYS`,
+  `--require-signature` / `BH_SHAKER_REQUIRE_SIGNATURE`); `BH_SHAKER_ALLOW_PLATFORM_MISMATCH` overrides. `lib/seal.libsh`.
+- **`verify --files`**: every installed file, link and directory against `files.sha256`, skipping the `mutable` records of `runtime.spec`.
+- **`shaker restore <artifact>`** (`lib/artifact.libsh`): unpacks a Distillery artifact with only bash and tar after checking the tarball sha256,
+  the sidecar signature, platform, build root and member paths; nothing is written before they pass.
+- **`shaker up <pkg> [--plan] [--run]`** (`lib/up.libsh`): install + init of the dependencies from `BH_PKG_DEPENDS` first, recipe check, cycle detection.
+- **Conditional template lines**: a line starting `{{? NAME }}` is rendered only when `NAME` is set and non-empty.
+- **User manual** (`docs/MANUAL.md`) with outputs of real runs.
+- CI: shellcheck and a 6-distribution portability matrix; 226 assertions.
+
+### Fixed
+- `tests/test_up.sh` no longer inherits `BH_PKG_ARCH`/`BH_PKG_LIBC` from `test_seal.sh` (the runner sources all test files in one process),
+  which broke the musl leg.
+
 ## [0.3.0] - 2026-10-23
 
 ### Added

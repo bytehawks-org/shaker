@@ -3,7 +3,7 @@
 ## Run the tests
 
 ```sh
-./tests/run.sh                       # everything (221 assertions)
+./tests/run.sh                       # everything (226 assertions)
 ./tests/run.sh tests/test_rosetta.sh # one file
 ```
 
