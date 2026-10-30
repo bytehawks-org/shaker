@@ -133,7 +133,7 @@ spec yet.
 | Command | |
 |---|---|
 | `shaker detect [--format=text\|env]` | prints `BH_SHAKER_DEPLOYMENT_*`, `OS_*`, `OS_FAMILY`, `INIT_SYSTEM`, `ARCH`, `LIBC`, `OS_PKG_MANAGER*` |
-| `shaker render <template> [dest]` | `{{ NAME }}` / `{{ NAME:-default }}` from the environment; unset without default = error, no file written |
+| `shaker render <template> [dest]` | `{{ NAME }}` / `{{ NAME:-default }}` from the environment; a line starting `{{? NAME }}` only when `NAME` is set and non-empty; unset without default = error, no file written |
 | `shaker pkg install\|remove <names>` | logical names (`share/pkgmap.map`) → real names; `BH_SHAKER_DRY_RUN=true` prints the command |
 | `shaker pkg update\|clean` | refresh / drop package-manager caches (image layers) |
 | `shaker pkg check <names>` | exit 0 if all installed |
