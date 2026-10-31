@@ -347,10 +347,10 @@ export BH_SHAKER_REQUIRE_SIGNATURE=true
 ```
 
 ```console
-$ shaker restore dist/bh_demolib_all_library_amd64_2.0_9643d43809df.tar.gz
+$ shaker restore dist/demolib_bh_all_library_amd64_2.0_9643d43809df.tar.gz
 [INFO] Signature ok: signed by A7F44A4763E0F51B851548BA70F9957CE632215A
 [INFO] Restored demolib 2.0 (9643d43809df) into /tmp/dw; next: shaker install demolib
-$ shaker restore dist/bh_demoweb_stable_application_amd64_1.0_7d0eaad55e4f.tar.gz
+$ shaker restore dist/demoweb_bh_stable_application_amd64_1.0_7d0eaad55e4f.tar.gz
 [INFO] Signature ok: signed by A7F44A4763E0F51B851548BA70F9957CE632215A
 [INFO] Restored demoweb 1.0 (7d0eaad55e4f) into /tmp/dw; next: shaker install demoweb
 ```
