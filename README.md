@@ -59,7 +59,7 @@ shaker up nifi --run                      # install + init in that order, then s
 
 # 5. no Distillery on this host: unpack a signed artifact, prove what is installed
 export BH_SHAKER_TRUSTED_FINGERPRINTS=<primary fingerprint> BH_SHAKER_REQUIRE_SIGNATURE=true
-shaker restore bh--nifi--stable--application--amd64--2.9.0--eba708a011c1.tar.gz
+shaker restore bh_nifi_stable_application_amd64_2.9.0_eba708a011c1.tar.gz
 shaker verify nifi --files --require-signature
 ```
 
