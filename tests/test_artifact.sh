@@ -1,7 +1,7 @@
 # artifact.libsh: `shaker restore` of a Distillery artifact. The artifacts are written by hand (tar + sidecar): no Distillery.
 
 _artifact_make() {  # <dir> [name] : <name>.tar.gz + <name>.json for package "demo" 1.0, root = $BH_ROOT
-    local dir="$1" name="${2:-bh--demo--stable--application--amd64--1.0--abcdef012345}" src
+    local dir="$1" name="${2:-demo_bh_stable_application_amd64_1.0_abcdef012345}" src
     src="$(mktemp -d "${dir}/src.XXXXXX")"
     mkdir -p "${src}/demo/bin" "${src}/demo/.bytehawks"
     printf '#!/bin/sh\n' > "${src}/demo/bin/tool"; chmod 755 "${src}/demo/bin/tool"
@@ -33,7 +33,7 @@ JSON
 
 t="$(new_tmp)"; export BH_ROOT="${t}/root"; mkdir -p "${t}/a"
 detect_arch; detect_libc
-art="${t}/a/bh--demo--stable--application--amd64--1.0--abcdef012345"
+art="${t}/a/demo_bh_stable_application_amd64_1.0_abcdef012345"
 
 _artifact_make "${t}/a"; _artifact_sidecar "${t}/a" "$(basename "${art}")" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
 assert_eq "demo" "$(_artifact_field "${art}.json" package)" "restore: sidecar fields are read"
@@ -54,7 +54,7 @@ assert_fail "restore: missing sidecar" artifact_restore "${t}/bad.tar.gz" --side
 assert_eq "" "$(ls -A "${BH_ROOT}/demo" 2>/dev/null)" "restore: nothing written when a check fails"
 
 # platform and root
-n="bh--demo--stable--application--arm64--1.0--abcdef012345"; mkdir -p "${t}/b"
+n="demo_bh_stable_application_arm64_1.0_abcdef012345"; mkdir -p "${t}/b"
 _artifact_make "${t}/b" "${n}"; _artifact_sidecar "${t}/b" "${n}" "arm64" "${BH_SHAKER_LIBC}"
 if [[ "${BH_SHAKER_ARCH}" != "arm64" ]]; then
     assert_fail "restore: artifact of another architecture" artifact_restore "${t}/b/${n}.tar.gz"
@@ -120,7 +120,7 @@ if command -v gpg >/dev/null 2>&1; then
     gpg --batch --quiet --passphrase '' --quick-generate-key 'Artifact Test <art@example.com>' ed25519 sign never 2>/dev/null
     fpr="$(gpg --batch --with-colons --list-keys 2>/dev/null | awk -F: '/^fpr/{print $10; exit}')"
     rm -rf "${BH_ROOT}/demo" "${t}/s"; mkdir -p "${t}/s"
-    n="bh--demo--stable--application--amd64--1.0--abcdef012345"
+    n="demo_bh_stable_application_amd64_1.0_abcdef012345"
     _artifact_make "${t}/s"; _artifact_sidecar "${t}/s" "${n}" "${BH_SHAKER_ARCH}" "${BH_SHAKER_LIBC}"
 
     assert_fail "restore: unsigned artifact when a signature is required" env BH_SHAKER_REQUIRE_SIGNATURE=true BH_ROOT="${BH_ROOT}" \

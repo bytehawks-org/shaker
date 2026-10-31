@@ -15,6 +15,7 @@ versioning: [SemVer](https://semver.org/) (pre-1.0: minor versions may break).
 - **`shaker up <pkg> [--plan] [--run]`** (`lib/up.libsh`): install + init of the dependencies from `BH_PKG_DEPENDS` first, recipe check, cycle detection.
 - **Conditional template lines**: a line starting `{{? NAME }}` is rendered only when `NAME` is set and non-empty.
 - **User manual** (`docs/MANUAL.md`) with outputs of real runs.
+- Documentation follows Distillery's new artifact names (`<package>_bh_<variant>_<tag>_<platform>_<version>_<recipe12>`, `_` instead of `--`, configurable holder): `shaker restore` takes any path and reads the `.json`/`.json.asc` next to it, so nothing changes in the code.
 - CI: shellcheck and a 6-distribution portability matrix; 226 assertions.
 
 ### Fixed

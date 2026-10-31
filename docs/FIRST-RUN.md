@@ -38,7 +38,7 @@ the library. If the fix needs GNU tools, prefer `apk add tar sed` documented in 
 
 ```sh
 export BH_ROOT=/opt/bytehawks BH_SHAKER_TRUSTED_FINGERPRINTS=<primary fingerprint> BH_SHAKER_REQUIRE_SIGNATURE=true
-shaker restore bh--nifi--…tar.gz --require-signature    # after the same for temurin, or:
+shaker restore nifi_bh_…tar.gz --require-signature    # after the same for temurin, or:
 shaker up nifi --plan                                   # temurin, nifi
 shaker up nifi && shaker verify nifi --files --require-signature
 ```
