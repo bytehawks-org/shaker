@@ -26,6 +26,7 @@
 # Returns: 0 match, 1 mismatch, 2 nothing to compare (older bundle or host not detected).
 #
 ##############################################################################
+# shellcheck disable=SC2120  # the arguments are optional; lib/artifact.libsh passes them
 seal_check_platform() {
 
     local want_arch="${1-${BH_PKG_ARCH:-}}" want_libc="${2-${BH_PKG_LIBC:-}}"
