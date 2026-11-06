@@ -2,16 +2,16 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         # warnings and errors fail the build; "info" notes (SC1091: not following a sourced file) do not
         run: shellcheck -x --severity=warning -e SC2034 bin/shaker lib/*.libsh
       - name: tests
         run: ./tests/run.sh
   test-portability:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false              # one distribution failing must not hide the result of the others
       matrix:
@@ -27,5 +27,5 @@ jobs:
           elif command -v zypper >/dev/null; then zypper --non-interactive install git tar gzip findutils jq python3 python3-PyYAML gpg2;
           elif command -v pacman >/dev/null; then pacman -Sy --noconfirm git jq python python-yaml gnupg;
           elif command -v apt-get >/dev/null; then apt-get update && apt-get install -y git jq python3 python3-yaml gnupg tar; fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash ./tests/run.sh
